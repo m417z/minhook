@@ -57,12 +57,18 @@
 #define THREAD_ACCESS \
     (THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION | THREAD_SET_CONTEXT)
 
+// Function and function pointer declarations.
+typedef MH_STATUS(WINAPI *ENABLE_HOOK_LL_PROC)(UINT pos, BOOL enable);
+typedef MH_STATUS(WINAPI *DISABLE_HOOK_CHAIN_PROC)(LPVOID pTarget, UINT parentPos, ENABLE_HOOK_LL_PROC ParentEnableHookLL);
+
+static MH_STATUS WINAPI DisableHookChain(LPVOID pTarget, UINT parentPos, ENABLE_HOOK_LL_PROC ParentEnableHookLL);
+
 #pragma pack(push, 1)
 
 // Executable buffer of a hook.
 typedef struct _EXEC_BUFFER
 {
-    DWORD_PTR userData;
+    DISABLE_HOOK_CHAIN_PROC pDisableHookChain;
     JMP_RELAY jmpRelay;
     UINT8     trampoline[MEMORY_SLOT_SIZE - sizeof(DWORD_PTR) - sizeof(JMP_RELAY)];
 } EXEC_BUFFER, *PEXEC_BUFFER;
@@ -358,7 +364,7 @@ static VOID Unfreeze(PFROZEN_THREADS pThreads)
 }
 
 //-------------------------------------------------------------------------
-static MH_STATUS EnableHookLL(UINT pos, BOOL enable)
+static MH_STATUS WINAPI EnableHookLL(UINT pos, BOOL enable)
 {
     PHOOK_ENTRY pHook = &g_hooks.pItems[pos];
     DWORD  oldProtect;
@@ -395,7 +401,7 @@ static MH_STATUS EnableHookLL(UINT pos, BOOL enable)
         memcpy(pHook->newIPs, ct.newIPs, ARRAYSIZE(ct.newIPs));
     }
 
-    if (!enable && !pHook->patchAbove)
+    if (!enable)
     {
         PJMP_REL pJmp = (PJMP_REL)pPatchTarget;
         if (pJmp->opcode == 0xE9)
@@ -404,10 +410,7 @@ static MH_STATUS EnableHookLL(UINT pos, BOOL enable)
             if (&pHook->pExecBuffer->jmpRelay != pJmpRelay)
             {
                 PEXEC_BUFFER pOtherExecBuffer = (PEXEC_BUFFER)((LPBYTE)pJmpRelay - offsetof(EXEC_BUFFER, jmpRelay));
-
-                __debugbreak();
-                // TODO
-                // return DisableHookChain(EnableHookLL);
+                return pOtherExecBuffer->pDisableHookChain(pHook->pTarget, pos, EnableHookLL);
             }
         }
     }
@@ -605,7 +608,7 @@ MH_STATUS WINAPI MH_CreateHook(LPVOID pTarget, LPVOID pDetour, LPVOID *ppOrigina
                 PEXEC_BUFFER pBuffer = AllocateBuffer(pTarget);
                 if (pBuffer != NULL)
                 {
-                    pBuffer->userData = 0; // TODO: make use of this.
+                    pBuffer->pDisableHookChain = DisableHookChain;
                     CreateRelayFunction(&pBuffer->jmpRelay, pDetour);
 
                     PHOOK_ENTRY pHook = AddHookEntry();
@@ -696,6 +699,46 @@ MH_STATUS WINAPI MH_RemoveHook(LPVOID pTarget)
     LeaveSpinLock();
 
     return status;
+}
+
+//-------------------------------------------------------------------------
+static MH_STATUS WINAPI DisableHookChain(LPVOID pTarget, UINT parentPos, ENABLE_HOOK_LL_PROC ParentEnableHookLL)
+{
+    EnterSpinLock();
+    __try
+    {
+        UINT pos;
+        MH_STATUS status;
+
+        if (g_hHeap == NULL)
+            return MH_ERROR_NOT_INITIALIZED;
+
+        pos = FindHookEntry(pTarget);
+        if (pos == INVALID_HOOK_POS)
+            return MH_ERROR_NOT_CREATED;
+
+        if (g_hooks.pItems[pos].isEnabled == FALSE)
+            return MH_ERROR_DISABLED;
+
+        // We're not Freeze()-ing the threads here, because we assume that the function
+        // was called from a different MinHook module, which already suspended all threads.
+        // Also, we don't need to adjust the IP registers, as the relay and the trampoline
+        // functions remain on the same location, and both contain a single instruction.
+
+        status = EnableHookLL(pos, FALSE);
+        if (status != MH_OK)
+            return status;
+
+        status = ParentEnableHookLL(parentPos, FALSE);
+        if (status != MH_OK)
+            return status;
+
+        return EnableHookLL(pos, TRUE);
+    }
+    __finally
+    {
+        LeaveSpinLock();
+    }
 }
 
 //-------------------------------------------------------------------------
