@@ -57,18 +57,30 @@
 #define THREAD_ACCESS \
     (THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION | THREAD_SET_CONTEXT)
 
+#pragma pack(push, 1)
+
+// Executable buffer of a hook.
+typedef struct _EXEC_BUFFER
+{
+    DWORD_PTR userData;
+    JMP_RELAY jmpRelay;
+    UINT8     trampoline[MEMORY_SLOT_SIZE - sizeof(DWORD_PTR) - sizeof(JMP_RELAY)];
+} EXEC_BUFFER, *PEXEC_BUFFER;
+
+#pragma pack(pop)
+
 // Hook information.
 typedef struct _HOOK_ENTRY
 {
     LPVOID pTarget;             // Address of the target function.
-    LPVOID pDetour;             // Address of the detour or relay function.
-    LPVOID pTrampoline;         // Address of the trampoline function.
-    UINT8  backup[8];           // Original prologue of the target function.
+    LPVOID pDetour;             // Address of the detour function.
+    PEXEC_BUFFER pExecBuffer;   // Address of the executable buffer for relay and trampoline.
 
-    UINT8  patchAbove  : 1;     // Uses the hot patch area.
     UINT8  isEnabled   : 1;     // Enabled.
     UINT8  queueEnable : 1;     // Queued for enabling/disabling when != isEnabled.
 
+    UINT8  backup[8];           // Original prologue of the target function.
+    BOOL   patchAbove;          // Uses the hot patch area.
     UINT   nIP : 4;             // Count of the instruction boundaries.
     UINT8  oldIPs[8];           // Instruction boundaries of the target function.
     UINT8  newIPs[8];           // Instruction boundaries of the trampoline function.
@@ -169,15 +181,13 @@ static DWORD_PTR FindOldIP(PHOOK_ENTRY pHook, DWORD_PTR ip)
 
     for (i = 0; i < pHook->nIP; ++i)
     {
-        if (ip == ((DWORD_PTR)pHook->pTrampoline + pHook->newIPs[i]))
+        if (ip == ((DWORD_PTR)pHook->pExecBuffer->trampoline + pHook->newIPs[i]))
             return (DWORD_PTR)pHook->pTarget + pHook->oldIPs[i];
     }
 
-#if defined(_M_X64) || defined(__x86_64__)
     // Check relay function.
-    if (ip == (DWORD_PTR)pHook->pDetour)
+    if (ip == (DWORD_PTR)&pHook->pExecBuffer->jmpRelay)
         return (DWORD_PTR)pHook->pTarget;
-#endif
 
     return 0;
 }
@@ -189,7 +199,7 @@ static DWORD_PTR FindNewIP(PHOOK_ENTRY pHook, DWORD_PTR ip)
     for (i = 0; i < pHook->nIP; ++i)
     {
         if (ip == ((DWORD_PTR)pHook->pTarget + pHook->oldIPs[i]))
-            return (DWORD_PTR)pHook->pTrampoline + pHook->newIPs[i];
+            return (DWORD_PTR)pHook->pExecBuffer->trampoline + pHook->newIPs[i];
     }
 
     return 0;
@@ -355,6 +365,53 @@ static MH_STATUS EnableHookLL(UINT pos, BOOL enable)
     SIZE_T patchSize    = sizeof(JMP_REL);
     LPBYTE pPatchTarget = (LPBYTE)pHook->pTarget;
 
+    if (enable)
+    {
+        TRAMPOLINE ct;
+        ct.pTarget        = pHook->pTarget;
+        ct.pTrampoline    = pHook->pExecBuffer->trampoline;
+        ct.trampolineSize = sizeof(pHook->pExecBuffer->trampoline);
+        if (!CreateTrampolineFunction(&ct))
+        {
+            return MH_ERROR_UNSUPPORTED_FUNCTION;
+        }
+
+        // Back up the target function.
+        if (ct.patchAbove)
+        {
+            memcpy(
+                pHook->backup,
+                (LPBYTE)pHook->pTarget - sizeof(JMP_REL),
+                sizeof(JMP_REL) + sizeof(JMP_REL_SHORT));
+        }
+        else
+        {
+            memcpy(pHook->backup, pHook->pTarget, sizeof(JMP_REL));
+        }
+
+        pHook->patchAbove  = ct.patchAbove;
+        pHook->nIP         = ct.nIP;
+        memcpy(pHook->oldIPs, ct.oldIPs, ARRAYSIZE(ct.oldIPs));
+        memcpy(pHook->newIPs, ct.newIPs, ARRAYSIZE(ct.newIPs));
+    }
+
+    if (!enable && !pHook->patchAbove)
+    {
+        PJMP_REL pJmp = (PJMP_REL)pPatchTarget;
+        if (pJmp->opcode == 0xE9)
+        {
+            PJMP_RELAY pJmpRelay = (LPVOID)(((LPBYTE)pJmp + sizeof(JMP_REL)) + (INT32)pJmp->operand);
+            if (&pHook->pExecBuffer->jmpRelay != pJmpRelay)
+            {
+                PEXEC_BUFFER pOtherExecBuffer = (PEXEC_BUFFER)((LPBYTE)pJmpRelay - offsetof(EXEC_BUFFER, jmpRelay));
+
+                __debugbreak();
+                // TODO
+                // return DisableHookChain(EnableHookLL);
+            }
+        }
+    }
+
     if (pHook->patchAbove)
     {
         pPatchTarget -= sizeof(JMP_REL);
@@ -368,7 +425,7 @@ static MH_STATUS EnableHookLL(UINT pos, BOOL enable)
     {
         PJMP_REL pJmp = (PJMP_REL)pPatchTarget;
         pJmp->opcode = 0xE9;
-        pJmp->operand = (UINT32)((LPBYTE)pHook->pDetour - (pPatchTarget + sizeof(JMP_REL)));
+        pJmp->operand = (UINT32)((LPBYTE)&pHook->pExecBuffer->jmpRelay - (pPatchTarget + sizeof(JMP_REL)));
 
         if (pHook->patchAbove)
         {
@@ -545,58 +602,27 @@ MH_STATUS WINAPI MH_CreateHook(LPVOID pTarget, LPVOID pDetour, LPVOID *ppOrigina
             UINT pos = FindHookEntry(pTarget);
             if (pos == INVALID_HOOK_POS)
             {
-                LPVOID pBuffer = AllocateBuffer(pTarget);
+                PEXEC_BUFFER pBuffer = AllocateBuffer(pTarget);
                 if (pBuffer != NULL)
                 {
-                    TRAMPOLINE ct;
+                    pBuffer->userData = 0; // TODO: make use of this.
+                    CreateRelayFunction(&pBuffer->jmpRelay, pDetour);
 
-                    ct.pTarget     = pTarget;
-                    ct.pDetour     = pDetour;
-                    ct.pTrampoline = pBuffer;
-                    if (CreateTrampolineFunction(&ct))
+                    PHOOK_ENTRY pHook = AddHookEntry();
+                    if (pHook != NULL)
                     {
-                        PHOOK_ENTRY pHook = AddHookEntry();
-                        if (pHook != NULL)
-                        {
-                            pHook->pTarget     = ct.pTarget;
-#if defined(_M_X64) || defined(__x86_64__)
-                            pHook->pDetour     = ct.pRelay;
-#else
-                            pHook->pDetour     = ct.pDetour;
-#endif
-                            pHook->pTrampoline = ct.pTrampoline;
-                            pHook->patchAbove  = ct.patchAbove;
-                            pHook->isEnabled   = FALSE;
-                            pHook->queueEnable = FALSE;
-                            pHook->nIP         = ct.nIP;
-                            memcpy(pHook->oldIPs, ct.oldIPs, ARRAYSIZE(ct.oldIPs));
-                            memcpy(pHook->newIPs, ct.newIPs, ARRAYSIZE(ct.newIPs));
+                        pHook->pTarget = pTarget;
+                        pHook->pDetour = pDetour;
+                        pHook->pExecBuffer = pBuffer;
+                        pHook->isEnabled = FALSE;
+                        pHook->queueEnable = FALSE;
 
-                            // Back up the target function.
-
-                            if (ct.patchAbove)
-                            {
-                                memcpy(
-                                    pHook->backup,
-                                    (LPBYTE)pTarget - sizeof(JMP_REL),
-                                    sizeof(JMP_REL) + sizeof(JMP_REL_SHORT));
-                            }
-                            else
-                            {
-                                memcpy(pHook->backup, pTarget, sizeof(JMP_REL));
-                            }
-
-                            if (ppOriginal != NULL)
-                                *ppOriginal = pHook->pTrampoline;
-                        }
-                        else
-                        {
-                            status = MH_ERROR_MEMORY_ALLOC;
-                        }
+                        if (ppOriginal != NULL)
+                            *ppOriginal = pBuffer->trampoline;
                     }
                     else
                     {
-                        status = MH_ERROR_UNSUPPORTED_FUNCTION;
+                        status = MH_ERROR_MEMORY_ALLOC;
                     }
 
                     if (status != MH_OK)
@@ -653,7 +679,7 @@ MH_STATUS WINAPI MH_RemoveHook(LPVOID pTarget)
 
             if (status == MH_OK)
             {
-                FreeBuffer(g_hooks.pItems[pos].pTrampoline);
+                FreeBuffer(g_hooks.pItems[pos].pExecBuffer);
                 DeleteHookEntry(pos);
             }
         }
