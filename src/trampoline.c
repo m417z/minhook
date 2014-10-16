@@ -50,13 +50,6 @@
 #include "trampoline.h"
 #include "buffer.h"
 
-// Maximum size of a trampoline function.
-#if defined(_M_X64) || defined(__x86_64__)
-    #define TRAMPOLINE_MAX_SIZE (MEMORY_SLOT_SIZE - sizeof(JMP_ABS))
-#else
-    #define TRAMPOLINE_MAX_SIZE MEMORY_SLOT_SIZE
-#endif
-
 //-------------------------------------------------------------------------
 static BOOL IsCodePadding(LPBYTE pInst, UINT size)
 {
@@ -71,6 +64,28 @@ static BOOL IsCodePadding(LPBYTE pInst, UINT size)
             return FALSE;
     }
     return TRUE;
+}
+
+//-------------------------------------------------------------------------
+VOID CreateRelayFunction(PJMP_RELAY pJmpRelay, LPVOID pDetour)
+{
+#if defined(_M_X64) || defined(__x86_64__)
+    JMP_ABS jmp = {
+        0xFF, 0x25, 0x00000000, // FF25 00000000: JMP [RIP+6]
+        0x0000000000000000ULL   // Absolute destination address
+    };
+
+    jmp.address = (ULONG_PTR)pDetour;
+#else
+    JMP_REL jmp = {
+        0xE9,                   // E9 xxxxxxxx: JMP +5+xxxxxxxx
+        0x00000000              // Relative destination address
+    };
+
+    jmp.operand = (UINT32)((LPBYTE)pDetour - ((LPBYTE)pJmpRelay + sizeof(jmp)));
+#endif
+
+    memcpy(pJmpRelay, &jmp, sizeof(jmp));
 }
 
 //-------------------------------------------------------------------------
@@ -266,7 +281,7 @@ BOOL CreateTrampolineFunction(PTRAMPOLINE ct)
             return FALSE;
 
         // Trampoline function is too large.
-        if ((newPos + copySize) > TRAMPOLINE_MAX_SIZE)
+        if ((newPos + copySize) > ct->trampolineSize)
             return FALSE;
 
         // Trampoline function has too many instructions.
@@ -307,14 +322,6 @@ BOOL CreateTrampolineFunction(PTRAMPOLINE ct)
 
         ct->patchAbove = TRUE;
     }
-
-#if defined(_M_X64) || defined(__x86_64__)
-    // Create a relay function.
-    jmp.address = (ULONG_PTR)ct->pDetour;
-
-    ct->pRelay = (LPBYTE)ct->pTrampoline + newPos;
-    memcpy(ct->pRelay, &jmp, sizeof(jmp));
-#endif
 
     return TRUE;
 }

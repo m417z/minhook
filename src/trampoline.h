@@ -36,7 +36,7 @@
 typedef struct _JMP_REL_SHORT
 {
     UINT8  opcode;      // EB xx: JMP +2+xx
-    UINT8  operand;
+    UINT8  operand;     // Relative destination address
 } JMP_REL_SHORT, *PJMP_REL_SHORT;
 
 // 32-bit direct relative jump/call.
@@ -87,19 +87,25 @@ typedef struct _JCC_ABS
 
 #pragma pack(pop)
 
+#if defined(_M_X64) || defined(__x86_64__)
+    typedef JMP_ABS  JMP_RELAY;
+    typedef PJMP_ABS PJMP_RELAY;
+#else
+    typedef JMP_REL  JMP_RELAY;
+    typedef PJMP_REL PJMP_RELAY;
+#endif
+
 typedef struct _TRAMPOLINE
 {
     LPVOID pTarget;         // [In] Address of the target function.
-    LPVOID pDetour;         // [In] Address of the detour function.
-    LPVOID pTrampoline;     // [In] Buffer address for the trampoline and relay function.
+    LPVOID pTrampoline;     // [In] Buffer address for the trampoline function.
+    UINT   trampolineSize;  // [In] The size of the trampoline function buffer.
 
-#if defined(_M_X64) || defined(__x86_64__)
-    LPVOID pRelay;          // [Out] Address of the relay function.
-#endif
     BOOL   patchAbove;      // [Out] Should use the hot patch area?
     UINT   nIP;             // [Out] Number of the instruction boundaries.
     UINT8  oldIPs[8];       // [Out] Instruction boundaries of the target function.
     UINT8  newIPs[8];       // [Out] Instruction boundaries of the trampoline function.
 } TRAMPOLINE, *PTRAMPOLINE;
 
+VOID CreateRelayFunction(PJMP_RELAY pJmpRelay, LPVOID pDetour);
 BOOL CreateTrampolineFunction(PTRAMPOLINE ct);
