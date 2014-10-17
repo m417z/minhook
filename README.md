@@ -1,3 +1,13 @@
+# About the `multihook` branch
+
+This branch supports hooking the same function from multiple instances of MinHook. In addition to the new enhancement, it has a couple of new limitations:
+
+* The original function pointer, returned from `MH_CreateHook`, can only be called when the hook is enabled.
+* The `MH_Initialize`, `MH_Uninitialize` functions are not thread safe anymore.
+* A mutex object is used for synchronization, and thus a new error code was introduced, `MH_ERROR_MUTEX_FAILURE`.
+
+You can see a simple demo [here](https://github.com/RaMMicHaeL/minhook-multihook-demo).
+
 # MinHook
 
 [![License](https://img.shields.io/badge/License-BSD%202--Clause-orange.svg)](https://opensource.org/licenses/BSD-2-Clause)
