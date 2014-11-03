@@ -47,10 +47,6 @@
 // Special hook position values.
 #define INVALID_HOOK_POS UINT_MAX
 
-// Freeze() action argument defines.
-#define ACTION_DISABLE      0
-#define ACTION_ENABLE       1
-
 // Thread access rights for suspending/resuming threads.
 #define THREAD_ACCESS \
     (THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION | THREAD_SET_CONTEXT)
@@ -210,7 +206,7 @@ static DWORD_PTR FindNewIP(PHOOK_ENTRY pHook, DWORD_PTR ip)
 }
 
 //-------------------------------------------------------------------------
-static VOID ProcessThreadIPs(HANDLE hThread, UINT pos, UINT action)
+static VOID ProcessThreadIPs(HANDLE hThread, UINT pos, BOOL enable)
 {
     // If the thread suspended in the overwritten area,
     // move IP to the proper address.
@@ -228,7 +224,7 @@ static VOID ProcessThreadIPs(HANDLE hThread, UINT pos, UINT action)
     if (!GetThreadContext(hThread, &c))
         return;
 
-    if (action == ACTION_ENABLE)
+    if (enable)
         ip = FindNewIP(pHook, *pIP);
     else
         ip = FindOldIP(pHook, *pIP);
@@ -318,14 +314,14 @@ static BOOL EnumerateThreads(PFROZEN_THREADS pThreads)
 }
 
 //-------------------------------------------------------------------------
-static VOID ProcessFrozenThreads(PFROZEN_THREADS pThreads, UINT pos, UINT action)
+static VOID ProcessFrozenThreads(PFROZEN_THREADS pThreads, UINT pos, BOOL enable)
 {
     if (pThreads->pItems != NULL)
     {
         UINT i;
         for (i = 0; i < pThreads->size; ++i)
         {
-            ProcessThreadIPs(pThreads->pItems[i], pos, action);
+            ProcessThreadIPs(pThreads->pItems[i], pos, enable);
         }
     }
 }
@@ -437,6 +433,12 @@ static MH_STATUS WINAPI EnableHookLL(UINT pos, BOOL enable, PFROZEN_THREADS pThr
             }
         }
     }
+    else
+    {
+        MH_STATUS status = CreateHookTrampoline(pos);
+        if (status != MH_OK)
+            return status;
+    }
 
     if (pHook->patchAbove)
     {
@@ -446,8 +448,6 @@ static MH_STATUS WINAPI EnableHookLL(UINT pos, BOOL enable, PFROZEN_THREADS pThr
 
     if (!VirtualProtect(pPatchTarget, patchSize, PAGE_EXECUTE_READWRITE, &oldProtect))
         return MH_ERROR_MEMORY_PROTECT;
-
-    ProcessFrozenThreads(pThreads, pos, enable ? ACTION_ENABLE : ACTION_DISABLE);
 
     if (enable)
     {
@@ -475,6 +475,8 @@ static MH_STATUS WINAPI EnableHookLL(UINT pos, BOOL enable, PFROZEN_THREADS pThr
     // Just-in-case measure.
     FlushInstructionCache(GetCurrentProcess(), pPatchTarget, patchSize);
 
+    ProcessFrozenThreads(pThreads, pos, enable);
+
     pHook->isEnabled   = enable;
     pHook->queueEnable = enable;
 
@@ -493,25 +495,6 @@ static MH_STATUS EnableAllHooksLL(BOOL enable)
         {
             first = i;
             break;
-        }
-    }
-
-    if (first != INVALID_HOOK_POS)
-    {
-        if (enable)
-        {
-            for (i = first; i < g_hooks.size; ++i)
-            {
-                if (!g_hooks.pItems[i].isEnabled)
-                {
-                    status = CreateHookTrampoline(i);
-                    if (status != MH_OK)
-                    {
-                        first = INVALID_HOOK_POS;
-                        break;
-                    }
-                }
-            }
         }
     }
 
@@ -756,10 +739,6 @@ static MH_STATUS WINAPI DisableHookChain(LPVOID pTarget, UINT parentPos, ENABLE_
     if (status != MH_OK)
         return status;
 
-    status = CreateHookTrampoline(pos);
-    if (status != MH_OK)
-        return status;
-
     return EnableHookLL(pos, TRUE, pThreads);
 }
 
@@ -785,19 +764,13 @@ static MH_STATUS EnableHook(LPVOID pTarget, BOOL enable)
         {
             if (g_hooks.pItems[pos].isEnabled != enable)
             {
-                if (enable)
-                    status = CreateHookTrampoline(pos);
-
+                FROZEN_THREADS threads;
+                status = Freeze(&threads);
                 if (status == MH_OK)
                 {
-                    FROZEN_THREADS threads;
-                    status = Freeze(&threads);
-                    if (status == MH_OK)
-                    {
-                        status = EnableHookLL(pos, enable, &threads);
+                    status = EnableHookLL(pos, enable, &threads);
 
-                        Unfreeze(&threads);
-                    }
+                    Unfreeze(&threads);
                 }
             }
             else
@@ -893,23 +866,6 @@ MH_STATUS WINAPI MH_ApplyQueued(VOID)
         {
             first = i;
             break;
-        }
-    }
-
-    if (first != INVALID_HOOK_POS)
-    {
-        for (i = first; i < g_hooks.size; ++i)
-        {
-            PHOOK_ENTRY pHook = &g_hooks.pItems[i];
-            if (!pHook->isEnabled && pHook->queueEnable)
-            {
-                status = CreateHookTrampoline(i);
-                if (status != MH_OK)
-                {
-                    first = INVALID_HOOK_POS;
-                    break;
-                }
-            }
         }
     }
 
