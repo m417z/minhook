@@ -406,42 +406,47 @@ static VOID Unfreeze(PFROZEN_THREADS pThreads)
 }
 
 //-------------------------------------------------------------------------
+static MH_STATUS CreateHookTrampoline(UINT pos)
+{
+    PHOOK_ENTRY pHook = &g_hooks.pItems[pos];
+
+    TRAMPOLINE ct;
+    ct.pTarget = pHook->pTarget;
+    ct.pTrampoline = pHook->pExecBuffer->trampoline;
+    ct.trampolineSize = sizeof(pHook->pExecBuffer->trampoline);
+    if (!CreateTrampolineFunction(&ct))
+    {
+        return MH_ERROR_UNSUPPORTED_FUNCTION;
+    }
+
+    // Back up the target function.
+    if (ct.patchAbove)
+    {
+        memcpy(
+            pHook->backup,
+            (LPBYTE)pHook->pTarget - sizeof(JMP_REL),
+            sizeof(JMP_REL) + sizeof(JMP_REL_SHORT));
+    }
+    else
+    {
+        memcpy(pHook->backup, pHook->pTarget, sizeof(JMP_REL));
+    }
+
+    pHook->patchAbove = ct.patchAbove;
+    pHook->nIP = ct.nIP;
+    memcpy(pHook->oldIPs, ct.oldIPs, ARRAYSIZE(ct.oldIPs));
+    memcpy(pHook->newIPs, ct.newIPs, ARRAYSIZE(ct.newIPs));
+
+    return MH_OK;
+}
+
+//-------------------------------------------------------------------------
 static MH_STATUS WINAPI EnableHookLL(UINT pos, BOOL enable)
 {
     PHOOK_ENTRY pHook = &g_hooks.pItems[pos];
     DWORD  oldProtect;
     SIZE_T patchSize    = sizeof(JMP_REL);
     LPBYTE pPatchTarget = (LPBYTE)pHook->pTarget;
-
-    if (enable)
-    {
-        TRAMPOLINE ct;
-        ct.pTarget        = pHook->pTarget;
-        ct.pTrampoline    = pHook->pExecBuffer->trampoline;
-        ct.trampolineSize = sizeof(pHook->pExecBuffer->trampoline);
-        if (!CreateTrampolineFunction(&ct))
-        {
-            return MH_ERROR_UNSUPPORTED_FUNCTION;
-        }
-
-        // Back up the target function.
-        if (ct.patchAbove)
-        {
-            memcpy(
-                pHook->backup,
-                (LPBYTE)pHook->pTarget - sizeof(JMP_REL),
-                sizeof(JMP_REL) + sizeof(JMP_REL_SHORT));
-        }
-        else
-        {
-            memcpy(pHook->backup, pHook->pTarget, sizeof(JMP_REL));
-        }
-
-        pHook->patchAbove  = ct.patchAbove;
-        pHook->nIP         = ct.nIP;
-        memcpy(pHook->oldIPs, ct.oldIPs, ARRAYSIZE(ct.oldIPs));
-        memcpy(pHook->newIPs, ct.newIPs, ARRAYSIZE(ct.newIPs));
-    }
 
     if (!enable)
     {
@@ -510,6 +515,25 @@ static MH_STATUS EnableAllHooksLL(BOOL enable)
         {
             first = i;
             break;
+        }
+    }
+
+    if (first != INVALID_HOOK_POS)
+    {
+        if (enable)
+        {
+            for (i = first; i < g_hooks.size; ++i)
+            {
+                if (!g_hooks.pItems[i].isEnabled)
+                {
+                    status = CreateHookTrampoline(i);
+                    if (status != MH_OK)
+                    {
+                        first = INVALID_HOOK_POS;
+                        break;
+                    }
+                }
+            }
         }
     }
 
@@ -756,6 +780,10 @@ static MH_STATUS WINAPI DisableHookChain(LPVOID pTarget, UINT parentPos, ENABLE_
     if (status != MH_OK)
         return status;
 
+    status = CreateHookTrampoline(pos);
+    if (status != MH_OK)
+        return status;
+
     return EnableHookLL(pos, TRUE);
 }
 
@@ -781,13 +809,19 @@ static MH_STATUS EnableHook(LPVOID pTarget, BOOL enable)
         {
             if (g_hooks.pItems[pos].isEnabled != enable)
             {
-                FROZEN_THREADS threads;
-                status = Freeze(&threads, pos, ACTION_ENABLE);
+                if (enable)
+                    status = CreateHookTrampoline(pos);
+
                 if (status == MH_OK)
                 {
-                    status = EnableHookLL(pos, enable);
+                    FROZEN_THREADS threads;
+                    status = Freeze(&threads, pos, ACTION_ENABLE);
+                    if (status == MH_OK)
+                    {
+                        status = EnableHookLL(pos, enable);
 
-                    Unfreeze(&threads);
+                        Unfreeze(&threads);
+                    }
                 }
             }
             else
@@ -883,6 +917,23 @@ MH_STATUS WINAPI MH_ApplyQueued(VOID)
         {
             first = i;
             break;
+        }
+    }
+
+    if (first != INVALID_HOOK_POS)
+    {
+        for (i = first; i < g_hooks.size; ++i)
+        {
+            PHOOK_ENTRY pHook = &g_hooks.pItems[i];
+            if (!pHook->isEnabled && pHook->queueEnable)
+            {
+                status = CreateHookTrampoline(i);
+                if (status != MH_OK)
+                {
+                    first = INVALID_HOOK_POS;
+                    break;
+                }
+            }
         }
     }
 
