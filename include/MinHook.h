@@ -79,7 +79,10 @@ typedef enum MH_STATUS
     MH_ERROR_MODULE_NOT_FOUND,
 
     // The specified function is not found.
-    MH_ERROR_FUNCTION_NOT_FOUND
+    MH_ERROR_FUNCTION_NOT_FOUND,
+
+    // Failed to create, or to wait for the main mutex.
+    MH_ERROR_MUTEX_FAILURE
 }
 MH_STATUS;
 
