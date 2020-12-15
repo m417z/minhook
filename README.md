@@ -1,6 +1,6 @@
 # About the `multihook` branch
 
-This branch supports hooking the same function from multiple instances of MinHook. In addition to the new enhancement, it has a couple of new limitations:
+This branch supports hooking the same function from multiple instances of MinHook, as well as hooking the same function more than once from a single MinHook instance. In addition to the new enhancements, it has a couple of new limitations:
 
 * The original function pointer, returned from `MH_CreateHook`, can only be called when the hook is enabled.
 * The `MH_Initialize`, `MH_Uninitialize` functions are not thread safe anymore.
