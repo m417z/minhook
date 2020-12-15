@@ -61,34 +61,33 @@ typedef struct _FROZEN_THREADS
 
 // Function and function pointer declarations.
 typedef MH_STATUS(WINAPI *ENABLE_HOOK_LL_PROC)(UINT pos, BOOL enable, PFROZEN_THREADS pThreads);
-typedef MH_STATUS(WINAPI *DISABLE_HOOK_CHAIN_PROC)(LPVOID pTarget, UINT parentPos, ENABLE_HOOK_LL_PROC ParentEnableHookLL, PFROZEN_THREADS pThreads);
+typedef MH_STATUS(WINAPI *DISABLE_HOOK_CHAIN_PROC)(ULONG_PTR hookIdent, LPVOID pTarget, UINT parentPos, ENABLE_HOOK_LL_PROC ParentEnableHookLL, PFROZEN_THREADS pThreads);
 
-static MH_STATUS WINAPI DisableHookChain(LPVOID pTarget, UINT parentPos, ENABLE_HOOK_LL_PROC ParentEnableHookLL, PFROZEN_THREADS pThreads);
-
-#pragma pack(push, 1)
+static MH_STATUS WINAPI DisableHookChain(ULONG_PTR hookIdent, LPVOID pTarget, UINT parentPos, ENABLE_HOOK_LL_PROC ParentEnableHookLL, PFROZEN_THREADS pThreads);
 
 // Executable buffer of a hook.
 typedef struct _EXEC_BUFFER
 {
     DISABLE_HOOK_CHAIN_PROC pDisableHookChain;
+    ULONG_PTR hookIdent;
     JMP_RELAY jmpRelay;
-    UINT8     trampoline[MEMORY_SLOT_SIZE - sizeof(DWORD_PTR) - sizeof(JMP_RELAY)];
+    UINT8     trampoline[1]; // Uses the rest of the MEMORY_SLOT_SIZE bytes.
 } EXEC_BUFFER, *PEXEC_BUFFER;
-
-#pragma pack(pop)
 
 // Hook information.
 typedef struct _HOOK_ENTRY
 {
+    ULONG_PTR hookIdent;        // Hook identifier, allows to hook the same function multiple times with different identifiers.
+
     LPVOID pTarget;             // Address of the target function.
     LPVOID pDetour;             // Address of the detour function.
     PEXEC_BUFFER pExecBuffer;   // Address of the executable buffer for relay and trampoline.
+    UINT8  backup[8];           // Original prologue of the target function.
 
+    UINT8  patchAbove  : 1;     // Uses the hot patch area.
     UINT8  isEnabled   : 1;     // Enabled.
     UINT8  queueEnable : 1;     // Queued for enabling/disabling when != isEnabled.
 
-    UINT8  backup[8];           // Original prologue of the target function.
-    BOOL   patchAbove;          // Uses the hot patch area.
     UINT   nIP : 4;             // Count of the instruction boundaries.
     UINT8  oldIPs[8];           // Instruction boundaries of the target function.
     UINT8  newIPs[8];           // Instruction boundaries of the trampoline function.
@@ -114,12 +113,13 @@ static struct
 
 //-------------------------------------------------------------------------
 // Returns INVALID_HOOK_POS if not found.
-static UINT FindHookEntry(LPVOID pTarget)
+static UINT FindHookEntry(ULONG_PTR hookIdent, LPVOID pTarget)
 {
     UINT i;
     for (i = 0; i < g_hooks.size; ++i)
     {
-        if ((ULONG_PTR)pTarget == (ULONG_PTR)g_hooks.pItems[i].pTarget)
+        PHOOK_ENTRY pHook = &g_hooks.pItems[i];
+        if ((ULONG_PTR)hookIdent == (ULONG_PTR)pHook->hookIdent && (ULONG_PTR)pTarget == (ULONG_PTR)pHook->pTarget)
             return i;
     }
 
@@ -385,7 +385,7 @@ static MH_STATUS CreateHookTrampoline(UINT pos)
     TRAMPOLINE ct;
     ct.pTarget = pHook->pTarget;
     ct.pTrampoline = pHook->pExecBuffer->trampoline;
-    ct.trampolineSize = sizeof(pHook->pExecBuffer->trampoline);
+    ct.trampolineSize = MEMORY_SLOT_SIZE - offsetof(EXEC_BUFFER, trampoline);
     if (!CreateTrampolineFunction(&ct))
     {
         return MH_ERROR_UNSUPPORTED_FUNCTION;
@@ -420,20 +420,7 @@ static MH_STATUS WINAPI EnableHookLL(UINT pos, BOOL enable, PFROZEN_THREADS pThr
     SIZE_T patchSize    = sizeof(JMP_REL);
     LPBYTE pPatchTarget = (LPBYTE)pHook->pTarget;
 
-    if (!enable)
-    {
-        PJMP_REL pJmp = (PJMP_REL)pPatchTarget;
-        if (pJmp->opcode == 0xE9)
-        {
-            PJMP_RELAY pJmpRelay = (PJMP_RELAY)(((LPBYTE)pJmp + sizeof(JMP_REL)) + (INT32)pJmp->operand);
-            if (&pHook->pExecBuffer->jmpRelay != pJmpRelay)
-            {
-                PEXEC_BUFFER pOtherExecBuffer = (PEXEC_BUFFER)((LPBYTE)pJmpRelay - offsetof(EXEC_BUFFER, jmpRelay));
-                return pOtherExecBuffer->pDisableHookChain(pHook->pTarget, pos, EnableHookLL, pThreads);
-            }
-        }
-    }
-    else
+    if (enable)
     {
         MH_STATUS status = CreateHookTrampoline(pos);
         if (status != MH_OK)
@@ -444,6 +431,20 @@ static MH_STATUS WINAPI EnableHookLL(UINT pos, BOOL enable, PFROZEN_THREADS pThr
     {
         pPatchTarget -= sizeof(JMP_REL);
         patchSize    += sizeof(JMP_REL_SHORT);
+    }
+
+    if (!enable)
+    {
+        PJMP_REL pJmp = (PJMP_REL)pPatchTarget;
+        if (pJmp->opcode == 0xE9)
+        {
+            PJMP_RELAY pJmpRelay = (PJMP_RELAY)(((LPBYTE)pJmp + sizeof(JMP_REL)) + (INT32)pJmp->operand);
+            if (&pHook->pExecBuffer->jmpRelay != pJmpRelay)
+            {
+                PEXEC_BUFFER pOtherExecBuffer = (PEXEC_BUFFER)((LPBYTE)pJmpRelay - offsetof(EXEC_BUFFER, jmpRelay));
+                return pOtherExecBuffer->pDisableHookChain(pOtherExecBuffer->hookIdent, pHook->pTarget, pos, EnableHookLL, pThreads);
+            }
+        }
     }
 
     if (!VirtualProtect(pPatchTarget, patchSize, PAGE_EXECUTE_READWRITE, &oldProtect))
@@ -484,14 +485,16 @@ static MH_STATUS WINAPI EnableHookLL(UINT pos, BOOL enable, PFROZEN_THREADS pThr
 }
 
 //-------------------------------------------------------------------------
-static MH_STATUS EnableAllHooksLL(BOOL enable)
+static MH_STATUS EnableHooksLL(BOOL bAllIdents, ULONG_PTR hookIdent, BOOL enable)
 {
     MH_STATUS status = MH_OK;
     UINT i, first = INVALID_HOOK_POS;
 
     for (i = 0; i < g_hooks.size; ++i)
     {
-        if (g_hooks.pItems[i].isEnabled != enable)
+        PHOOK_ENTRY pHook = &g_hooks.pItems[i];
+        if (pHook->isEnabled != enable &&
+            (bAllIdents || pHook->hookIdent == hookIdent))
         {
             first = i;
             break;
@@ -506,7 +509,9 @@ static MH_STATUS EnableAllHooksLL(BOOL enable)
         {
             for (i = first; i < g_hooks.size; ++i)
             {
-                if (g_hooks.pItems[i].isEnabled != enable)
+                PHOOK_ENTRY pHook = &g_hooks.pItems[i];
+                if (pHook->isEnabled != enable &&
+                    (bAllIdents || pHook->hookIdent == hookIdent))
                 {
                     status = EnableHookLL(i, enable, &threads);
                     if (status != MH_OK)
@@ -519,6 +524,12 @@ static MH_STATUS EnableAllHooksLL(BOOL enable)
     }
 
     return status;
+}
+
+//-------------------------------------------------------------------------
+static MH_STATUS EnableAllHooksLL(BOOL enable)
+{
+    return EnableHooksLL(TRUE, 0, enable);
 }
 
 //-------------------------------------------------------------------------
@@ -610,7 +621,7 @@ MH_STATUS WINAPI MH_Uninitialize(VOID)
 }
 
 //-------------------------------------------------------------------------
-MH_STATUS WINAPI MH_CreateHook(LPVOID pTarget, LPVOID pDetour, LPVOID *ppOriginal)
+MH_STATUS WINAPI MH_CreateHookEx(ULONG_PTR hookIdent, LPVOID pTarget, LPVOID pDetour, LPVOID *ppOriginal)
 {
     if (g_hMutex == NULL)
         return MH_ERROR_NOT_INITIALIZED;
@@ -622,18 +633,20 @@ MH_STATUS WINAPI MH_CreateHook(LPVOID pTarget, LPVOID pDetour, LPVOID *ppOrigina
 
     if (IsExecutableAddress(pTarget) && IsExecutableAddress(pDetour))
     {
-        UINT pos = FindHookEntry(pTarget);
+        UINT pos = FindHookEntry(hookIdent, pTarget);
         if (pos == INVALID_HOOK_POS)
         {
             PEXEC_BUFFER pBuffer = (PEXEC_BUFFER)AllocateBuffer(pTarget);
             if (pBuffer != NULL)
             {
-                pBuffer->pDisableHookChain = DisableHookChain;
-                CreateRelayFunction(&pBuffer->jmpRelay, pDetour);
-
                 PHOOK_ENTRY pHook = AddHookEntry();
                 if (pHook != NULL)
                 {
+                    pBuffer->hookIdent = hookIdent;
+                    pBuffer->pDisableHookChain = DisableHookChain;
+                    CreateRelayFunction(&pBuffer->jmpRelay, pDetour);
+
+                    pHook->hookIdent = hookIdent;
                     pHook->pTarget = pTarget;
                     pHook->pDetour = pDetour;
                     pHook->pExecBuffer = pBuffer;
@@ -674,7 +687,13 @@ MH_STATUS WINAPI MH_CreateHook(LPVOID pTarget, LPVOID pDetour, LPVOID *ppOrigina
 }
 
 //-------------------------------------------------------------------------
-MH_STATUS WINAPI MH_RemoveHook(LPVOID pTarget)
+MH_STATUS WINAPI MH_CreateHook(LPVOID pTarget, LPVOID pDetour, LPVOID* ppOriginal)
+{
+    return MH_CreateHookEx(0, pTarget, pDetour, ppOriginal);
+}
+
+//-------------------------------------------------------------------------
+MH_STATUS WINAPI MH_RemoveHookEx(ULONG_PTR hookIdent, LPVOID pTarget)
 {
     if (g_hMutex == NULL)
         return MH_ERROR_NOT_INITIALIZED;
@@ -684,7 +703,7 @@ MH_STATUS WINAPI MH_RemoveHook(LPVOID pTarget)
 
     MH_STATUS status = MH_OK;
 
-    UINT pos = FindHookEntry(pTarget);
+    UINT pos = FindHookEntry(hookIdent, pTarget);
     if (pos != INVALID_HOOK_POS)
     {
         if (g_hooks.pItems[pos].isEnabled)
@@ -716,12 +735,17 @@ MH_STATUS WINAPI MH_RemoveHook(LPVOID pTarget)
 }
 
 //-------------------------------------------------------------------------
-static MH_STATUS WINAPI DisableHookChain(LPVOID pTarget, UINT parentPos, ENABLE_HOOK_LL_PROC ParentEnableHookLL, PFROZEN_THREADS pThreads)
+MH_STATUS WINAPI MH_RemoveHook(LPVOID pTarget)
 {
-    UINT pos;
+    return MH_RemoveHookEx(0, pTarget);
+}
+
+//-------------------------------------------------------------------------
+static MH_STATUS WINAPI DisableHookChain(ULONG_PTR hookIdent, LPVOID pTarget, UINT parentPos, ENABLE_HOOK_LL_PROC ParentEnableHookLL, PFROZEN_THREADS pThreads)
+{
     MH_STATUS status;
 
-    pos = FindHookEntry(pTarget);
+    UINT pos = FindHookEntry(hookIdent, pTarget);
     if (pos == INVALID_HOOK_POS)
         return MH_ERROR_NOT_CREATED;
 
@@ -743,7 +767,7 @@ static MH_STATUS WINAPI DisableHookChain(LPVOID pTarget, UINT parentPos, ENABLE_
 }
 
 //-------------------------------------------------------------------------
-static MH_STATUS EnableHook(LPVOID pTarget, BOOL enable)
+static MH_STATUS EnableHook(ULONG_PTR hookIdent, LPVOID pTarget, BOOL enable)
 {
     if (g_hMutex == NULL)
         return MH_ERROR_NOT_INITIALIZED;
@@ -755,11 +779,11 @@ static MH_STATUS EnableHook(LPVOID pTarget, BOOL enable)
 
     if (pTarget == MH_ALL_HOOKS)
     {
-        status = EnableAllHooksLL(enable);
+        status = EnableHooksLL(FALSE, hookIdent, enable);
     }
     else
     {
-        UINT pos = FindHookEntry(pTarget);
+        UINT pos = FindHookEntry(hookIdent, pTarget);
         if (pos != INVALID_HOOK_POS)
         {
             if (g_hooks.pItems[pos].isEnabled != enable)
@@ -790,19 +814,31 @@ static MH_STATUS EnableHook(LPVOID pTarget, BOOL enable)
 }
 
 //-------------------------------------------------------------------------
+MH_STATUS WINAPI MH_EnableHookEx(ULONG_PTR hookIdent, LPVOID pTarget)
+{
+    return EnableHook(hookIdent, pTarget, TRUE);
+}
+
+//-------------------------------------------------------------------------
 MH_STATUS WINAPI MH_EnableHook(LPVOID pTarget)
 {
-    return EnableHook(pTarget, TRUE);
+    return MH_EnableHookEx(0, pTarget);
+}
+
+//-------------------------------------------------------------------------
+MH_STATUS WINAPI MH_DisableHookEx(ULONG_PTR hookIdent, LPVOID pTarget)
+{
+    return EnableHook(hookIdent, pTarget, FALSE);
 }
 
 //-------------------------------------------------------------------------
 MH_STATUS WINAPI MH_DisableHook(LPVOID pTarget)
 {
-    return EnableHook(pTarget, FALSE);
+    return MH_DisableHookEx(0, pTarget);
 }
 
 //-------------------------------------------------------------------------
-static MH_STATUS QueueHook(LPVOID pTarget, BOOL queueEnable)
+static MH_STATUS QueueHook(ULONG_PTR hookIdent, LPVOID pTarget, BOOL queueEnable)
 {
     if (g_hMutex == NULL)
         return MH_ERROR_NOT_INITIALIZED;
@@ -816,11 +852,15 @@ static MH_STATUS QueueHook(LPVOID pTarget, BOOL queueEnable)
     {
         UINT i;
         for (i = 0; i < g_hooks.size; ++i)
-            g_hooks.pItems[i].queueEnable = queueEnable;
+        {
+            PHOOK_ENTRY pHook = &g_hooks.pItems[i];
+            if (pHook->hookIdent == hookIdent)
+                pHook->queueEnable = queueEnable;
+        }
     }
     else
     {
-        UINT pos = FindHookEntry(pTarget);
+        UINT pos = FindHookEntry(hookIdent, pTarget);
         if (pos != INVALID_HOOK_POS)
         {
             g_hooks.pItems[pos].queueEnable = queueEnable;
@@ -837,15 +877,27 @@ static MH_STATUS QueueHook(LPVOID pTarget, BOOL queueEnable)
 }
 
 //-------------------------------------------------------------------------
+MH_STATUS WINAPI MH_QueueEnableHookEx(ULONG_PTR hookIdent, LPVOID pTarget)
+{
+    return QueueHook(hookIdent, pTarget, TRUE);
+}
+
+//-------------------------------------------------------------------------
 MH_STATUS WINAPI MH_QueueEnableHook(LPVOID pTarget)
 {
-    return QueueHook(pTarget, TRUE);
+    return MH_QueueEnableHookEx(0, pTarget);
+}
+
+//-------------------------------------------------------------------------
+MH_STATUS WINAPI MH_QueueDisableHookEx(ULONG_PTR hookIdent, LPVOID pTarget)
+{
+    return QueueHook(hookIdent, pTarget, FALSE);
 }
 
 //-------------------------------------------------------------------------
 MH_STATUS WINAPI MH_QueueDisableHook(LPVOID pTarget)
 {
-    return QueueHook(pTarget, FALSE);
+    return MH_QueueDisableHookEx(0, pTarget);
 }
 
 //-------------------------------------------------------------------------
