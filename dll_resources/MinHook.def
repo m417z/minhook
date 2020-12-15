@@ -1,14 +1,20 @@
-EXPORTS
+﻿EXPORTS
     MH_Initialize
     MH_Uninitialize
 
     MH_CreateHook
+    MH_CreateHookEx
     MH_CreateHookApi
     MH_CreateHookApiEx
     MH_RemoveHook
+    MH_RemoveHookEx
     MH_EnableHook
+    MH_EnableHookEx
     MH_DisableHook
+    MH_DisableHookEx
     MH_QueueEnableHook
+    MH_QueueEnableHookEx
     MH_QueueDisableHook
+    MH_QueueDisableHookEx
     MH_ApplyQueued
     MH_StatusToString
