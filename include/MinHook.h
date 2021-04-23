@@ -154,6 +154,8 @@ extern "C" {
     //                     different hooks to hook the same function more than
     //                     once. Default value: 0.
     //   pTarget     [in]  A pointer to the target function.
+    //                     If this parameter is MH_ALL_HOOKS, all created hooks are
+    //                     removed in one go.
     MH_STATUS WINAPI MH_RemoveHook(LPVOID pTarget);
     MH_STATUS WINAPI MH_RemoveHookEx(ULONG_PTR hookIdent, LPVOID pTarget);
 
