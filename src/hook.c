@@ -661,28 +661,52 @@ MH_STATUS WINAPI MH_RemoveHookEx(ULONG_PTR hookIdent, LPVOID pTarget)
 
     MH_STATUS status = MH_OK;
 
-    UINT pos = FindHookEntry(hookIdent, pTarget);
-    if (pos != INVALID_HOOK_POS)
+    if (pTarget == MH_ALL_HOOKS)
     {
-        if (g_hooks.pItems[pos].isEnabled)
-        {
-            FROZEN_THREADS threads;
-            Freeze(&threads);
-
-            status = EnableHookLL(pos, FALSE, &threads);
-
-            Unfreeze(&threads);
-        }
-
+        status = EnableHooksLL(FALSE, hookIdent, FALSE);
         if (status == MH_OK)
         {
-            FreeBuffer(g_hooks.pItems[pos].pExecBuffer);
-            DeleteHookEntry(pos);
+            UINT i = 0;
+            while (i < g_hooks.size)
+            {
+                PHOOK_ENTRY pHook = &g_hooks.pItems[i];
+                if (pHook->hookIdent == hookIdent)
+                {
+                    FreeBuffer(pHook->pExecBuffer);
+                    DeleteHookEntry(i);
+                }
+                else
+                {
+                    ++i;
+                }
+            }
         }
     }
     else
     {
-        status = MH_ERROR_NOT_CREATED;
+        UINT pos = FindHookEntry(hookIdent, pTarget);
+        if (pos != INVALID_HOOK_POS)
+        {
+            if (g_hooks.pItems[pos].isEnabled)
+            {
+                FROZEN_THREADS threads;
+                Freeze(&threads);
+
+                status = EnableHookLL(pos, FALSE, &threads);
+
+                Unfreeze(&threads);
+            }
+
+            if (status == MH_OK)
+            {
+                FreeBuffer(g_hooks.pItems[pos].pExecBuffer);
+                DeleteHookEntry(pos);
+            }
+        }
+        else
+        {
+            status = MH_ERROR_NOT_CREATED;
+        }
     }
 
     ReleaseMutex(g_hMutex);
@@ -739,12 +763,12 @@ static MH_STATUS EnableHook(ULONG_PTR hookIdent, LPVOID pTarget, BOOL enable)
     }
     else
     {
-        FROZEN_THREADS threads;
         UINT pos = FindHookEntry(hookIdent, pTarget);
         if (pos != INVALID_HOOK_POS)
         {
             if (g_hooks.pItems[pos].isEnabled != enable)
             {
+                FROZEN_THREADS threads;
                 Freeze(&threads);
 
                 status = EnableHookLL(pos, enable, &threads);
