@@ -487,9 +487,12 @@ static MH_STATUS EnableHooksLL(BOOL bAllIdents, ULONG_PTR hookIdent, BOOL enable
                 if (pHook->isEnabled != enable &&
                     (bAllIdents || pHook->hookIdent == hookIdent))
                 {
-                    status = EnableHookLL(i, enable, &threads);
-                    if (status != MH_OK)
-                        break;
+                    MH_STATUS enable_status = EnableHookLL(i, enable, &threads);
+
+                    // Instead of stopping on the first error, we enable as much
+                    // hooks as we can, and return the last error, if any.
+                    if (enable_status != MH_OK)
+                        status = enable_status;
                 }
             }
 
@@ -930,9 +933,12 @@ MH_STATUS WINAPI MH_ApplyQueued(VOID)
                 PHOOK_ENTRY pHook = &g_hooks.pItems[i];
                 if (pHook->isEnabled != pHook->queueEnable)
                 {
-                    status = EnableHookLL(i, pHook->queueEnable, &threads);
-                    if (status != MH_OK)
-                        break;
+                    MH_STATUS enable_status = EnableHookLL(i, pHook->queueEnable, &threads);
+
+                    // Instead of stopping on the first error, we apply as much
+                    // hooks as we can, and return the last error, if any.
+                    if (enable_status != MH_OK)
+                        status = enable_status;
                 }
             }
 
