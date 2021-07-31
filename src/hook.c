@@ -682,7 +682,7 @@ MH_STATUS WINAPI MH_RemoveHookEx(ULONG_PTR hookIdent, LPVOID pTarget)
 
     if (pTarget == MH_ALL_HOOKS)
     {
-        status = EnableHooksLL(FALSE, hookIdent, FALSE);
+        status = EnableHooksLL(TRUE, hookIdent, FALSE);
         if (status == MH_OK)
         {
             UINT i = 0;
