@@ -83,8 +83,29 @@ typedef enum MH_STATUS
 
     // Failed to create, or to wait for the main mutex.
     MH_ERROR_MUTEX_FAILURE
-}
-MH_STATUS;
+} MH_STATUS;
+
+// The method of suspending and resuming threads.
+//
+// It's possible to add an additional method using PssCaptureSnapshot.
+// Pros: Documented, fast.
+// Cons: Available from Windows 8.1, less reliable.
+typedef enum MH_THREAD_FREEZE_METHOD
+{
+    // The original MinHook method, using CreateToolhelp32Snapshot. Documented
+    // and supported on all Windows versions, but very slow and less reliable.
+    MH_FREEZE_METHOD_ORIGINAL = 0,
+
+    // A much faster and more reliable, but undocumented method, using
+    // NtGetNextThread. Supported since Windows Vista, on older versions falls
+    // back to MH_ORIGINAL.
+    MH_FREEZE_METHOD_FAST_UNDOCUMENTED,
+
+    // Threads are not suspended and instruction pointer registers are not
+    // adjusted. Don't use this method unless you understand the implications
+    // and know that it's safe.
+    MH_FREEZE_METHOD_NONE_UNSAFE
+} MH_THREAD_FREEZE_METHOD;
 
 // Can be passed as a parameter to MH_EnableHook, MH_DisableHook,
 // MH_QueueEnableHook or MH_QueueDisableHook.
@@ -101,6 +122,9 @@ extern "C" {
     // Uninitialize the MinHook library. You must call this function EXACTLY
     // ONCE at the end of your program.
     MH_STATUS WINAPI MH_Uninitialize(VOID);
+
+    // Set the method of suspending and resuming threads.
+    MH_STATUS WINAPI MH_SetThreadFreezeMethod(MH_THREAD_FREEZE_METHOD method);
 
     // Creates a hook for the specified target function, in disabled state.
     // Parameters:
