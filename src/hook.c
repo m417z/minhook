@@ -197,20 +197,27 @@ static VOID DeleteHookEntry(UINT pos)
 //-------------------------------------------------------------------------
 static DWORD_PTR FindOldIP(PHOOK_ENTRY pHook, DWORD_PTR ip)
 {
-    UINT i;
+    // In any of the jump locations:
+    // Target -> Hotpatch jump (if patchAbove) -> Relay jump
+    // Restore IP to the detour. This is required for consistent behavior
+    // as a part of a DisableHookChain call, otherwise, if IP is restored
+    // to the target, hooks that should be called may be skipped.
+
+    if (ip == (DWORD_PTR)pHook->pTarget)
+        return (DWORD_PTR)pHook->pDetour;
 
     if (pHook->patchAbove && ip == ((DWORD_PTR)pHook->pTarget - sizeof(JMP_REL)))
-        return (DWORD_PTR)pHook->pTarget;
+        return (DWORD_PTR)pHook->pDetour;
 
+    if (ip == (DWORD_PTR)&pHook->pExecBuffer->jmpRelay)
+        return (DWORD_PTR)pHook->pDetour;
+
+    UINT i;
     for (i = 0; i < pHook->nIP; ++i)
     {
         if (ip == ((DWORD_PTR)pHook->pExecBuffer->trampoline + pHook->newIPs[i]))
             return (DWORD_PTR)pHook->pTarget + pHook->oldIPs[i];
     }
-
-    // Check relay function.
-    if (ip == (DWORD_PTR)&pHook->pExecBuffer->jmpRelay)
-        return (DWORD_PTR)pHook->pTarget;
 
     return 0;
 }
