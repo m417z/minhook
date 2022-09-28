@@ -912,6 +912,43 @@ MH_STATUS WINAPI MH_RemoveHook(LPVOID pTarget)
 }
 
 //-------------------------------------------------------------------------
+MH_STATUS WINAPI MH_RemoveDisabledHooksEx(ULONG_PTR hookIdent)
+{
+    if (g_hMutex == NULL)
+        return MH_ERROR_NOT_INITIALIZED;
+
+    if (WaitForSingleObject(g_hMutex, INFINITE) != WAIT_OBJECT_0)
+        return MH_ERROR_MUTEX_FAILURE;
+
+    MH_STATUS status = MH_OK;
+
+    UINT i = 0;
+    while (i < g_hooks.size)
+    {
+        PHOOK_ENTRY pHook = &g_hooks.pItems[i];
+        if (pHook->hookIdent == hookIdent && !pHook->isEnabled)
+        {
+            FreeBuffer(pHook->pExecBuffer);
+            DeleteHookEntry(i);
+        }
+        else
+        {
+            ++i;
+        }
+    }
+
+    ReleaseMutex(g_hMutex);
+
+    return status;
+}
+
+//-------------------------------------------------------------------------
+MH_STATUS WINAPI MH_RemoveDisabledHooks()
+{
+    return MH_RemoveDisabledHooksEx(0);
+}
+
+//-------------------------------------------------------------------------
 static MH_STATUS WINAPI DisableHookChain(ULONG_PTR hookIdent, LPVOID pTarget, UINT parentPos, ENABLE_HOOK_LL_PROC ParentEnableHookLL, PFROZEN_THREADS pThreads)
 {
     MH_STATUS status;

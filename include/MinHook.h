@@ -183,6 +183,14 @@ extern "C" {
     MH_STATUS WINAPI MH_RemoveHook(LPVOID pTarget);
     MH_STATUS WINAPI MH_RemoveHookEx(ULONG_PTR hookIdent, LPVOID pTarget);
 
+    // Removes all disabled hooks.
+    // Parameters:
+    //   hookIdent   [in]  A hook identifier, can be set to different values for
+    //                     different hooks to hook the same function more than
+    //                     once. Default value: 0.
+    MH_STATUS WINAPI MH_RemoveDisabledHooks();
+    MH_STATUS WINAPI MH_RemoveDisabledHooksEx(ULONG_PTR hookIdent);
+
     // Enables an already created hook.
     // Parameters:
     //   hookIdent   [in]  A hook identifier, can be set to different values for
