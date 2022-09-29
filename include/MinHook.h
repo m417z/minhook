@@ -111,6 +111,9 @@ typedef enum MH_THREAD_FREEZE_METHOD
 // MH_QueueEnableHook or MH_QueueDisableHook.
 #define MH_ALL_HOOKS NULL
 
+#define MH_ALL_IDENTS 0
+#define MH_DEFAULT_IDENT 1
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -130,7 +133,7 @@ extern "C" {
     // Parameters:
     //   hookIdent   [in]  A hook identifier, can be set to different values for
     //                     different hooks to hook the same function more than
-    //                     once. Default value: 0.
+    //                     once. Default value: MH_DEFAULT_IDENT.
     //   pTarget     [in]  A pointer to the target function, which will be
     //                     overridden by the detour function.
     //   pDetour     [in]  A pointer to the detour function, which will override
@@ -176,7 +179,7 @@ extern "C" {
     // Parameters:
     //   hookIdent   [in]  A hook identifier, can be set to different values for
     //                     different hooks to hook the same function more than
-    //                     once. Default value: 0.
+    //                     once. Default value: MH_DEFAULT_IDENT.
     //   pTarget     [in]  A pointer to the target function.
     //                     If this parameter is MH_ALL_HOOKS, all created hooks are
     //                     removed in one go.
@@ -187,7 +190,7 @@ extern "C" {
     // Parameters:
     //   hookIdent   [in]  A hook identifier, can be set to different values for
     //                     different hooks to hook the same function more than
-    //                     once. Default value: 0.
+    //                     once. Default value: MH_DEFAULT_IDENT.
     MH_STATUS WINAPI MH_RemoveDisabledHooks();
     MH_STATUS WINAPI MH_RemoveDisabledHooksEx(ULONG_PTR hookIdent);
 
@@ -195,7 +198,7 @@ extern "C" {
     // Parameters:
     //   hookIdent   [in]  A hook identifier, can be set to different values for
     //                     different hooks to hook the same function more than
-    //                     once. Default value: 0.
+    //                     once. Default value: MH_DEFAULT_IDENT.
     //   pTarget     [in]  A pointer to the target function.
     //                     If this parameter is MH_ALL_HOOKS, all created hooks are
     //                     enabled in one go.
@@ -206,7 +209,7 @@ extern "C" {
     // Parameters:
     //   hookIdent   [in]  A hook identifier, can be set to different values for
     //                     different hooks to hook the same function more than
-    //                     once. Default value: 0.
+    //                     once. Default value: MH_DEFAULT_IDENT.
     //   pTarget     [in]  A pointer to the target function.
     //                     If this parameter is MH_ALL_HOOKS, all created hooks are
     //                     disabled in one go.
@@ -217,7 +220,7 @@ extern "C" {
     // Parameters:
     //   hookIdent   [in]  A hook identifier, can be set to different values for
     //                     different hooks to hook the same function more than
-    //                     once. Default value: 0.
+    //                     once. Default value: MH_DEFAULT_IDENT.
     //   pTarget     [in]  A pointer to the target function.
     //                     If this parameter is MH_ALL_HOOKS, all created hooks are
     //                     queued to be enabled.
@@ -228,7 +231,7 @@ extern "C" {
     // Parameters:
     //   hookIdent   [in]  A hook identifier, can be set to different values for
     //                     different hooks to hook the same function more than
-    //                     once. Default value: 0.
+    //                     once. Default value: MH_DEFAULT_IDENT.
     //   pTarget     [in]  A pointer to the target function.
     //                     If this parameter is MH_ALL_HOOKS, all created hooks are
     //                     queued to be disabled.
@@ -236,7 +239,11 @@ extern "C" {
     MH_STATUS WINAPI MH_QueueDisableHookEx(ULONG_PTR hookIdent, LPVOID pTarget);
 
     // Applies all queued changes in one go.
+    //   hookIdent   [in]  A hook identifier, can be set to different values for
+    //                     different hooks to hook the same function more than
+    //                     once. Default value: MH_DEFAULT_IDENT.
     MH_STATUS WINAPI MH_ApplyQueued(VOID);
+    MH_STATUS WINAPI MH_ApplyQueuedEx(ULONG_PTR hookIdent);
 
     // Translates the MH_STATUS to its name as a string.
     const char *WINAPI MH_StatusToString(MH_STATUS status);
