@@ -142,7 +142,7 @@ static UINT FindHookEntry(ULONG_PTR hookIdent, LPVOID pTarget)
     for (i = 0; i < g_hooks.size; ++i)
     {
         PHOOK_ENTRY pHook = &g_hooks.pItems[i];
-        if ((ULONG_PTR)hookIdent == (ULONG_PTR)pHook->hookIdent && (ULONG_PTR)pTarget == (ULONG_PTR)pHook->pTarget)
+        if (hookIdent == pHook->hookIdent && (ULONG_PTR)pTarget == (ULONG_PTR)pHook->pTarget)
             return i;
     }
 
@@ -600,7 +600,7 @@ static MH_STATUS WINAPI EnableHookLL(UINT pos, BOOL enable, PFROZEN_THREADS pThr
 }
 
 //-------------------------------------------------------------------------
-static MH_STATUS EnableHooksLL(BOOL bAllIdents, ULONG_PTR hookIdent, BOOL enable)
+static MH_STATUS EnableHooksLL(ULONG_PTR hookIdent, LPVOID pTarget, BOOL enable)
 {
     MH_STATUS status = MH_OK;
     UINT i, first = INVALID_HOOK_POS;
@@ -609,7 +609,8 @@ static MH_STATUS EnableHooksLL(BOOL bAllIdents, ULONG_PTR hookIdent, BOOL enable
     {
         PHOOK_ENTRY pHook = &g_hooks.pItems[i];
         if (pHook->isEnabled != enable &&
-            (bAllIdents || pHook->hookIdent == hookIdent))
+            (hookIdent == MH_ALL_IDENTS || pHook->hookIdent == hookIdent) &&
+            (pTarget == MH_ALL_HOOKS || (ULONG_PTR)pTarget == (ULONG_PTR)pHook->pTarget))
         {
             first = i;
             break;
@@ -626,7 +627,8 @@ static MH_STATUS EnableHooksLL(BOOL bAllIdents, ULONG_PTR hookIdent, BOOL enable
             {
                 PHOOK_ENTRY pHook = &g_hooks.pItems[i];
                 if (pHook->isEnabled != enable &&
-                    (bAllIdents || pHook->hookIdent == hookIdent))
+                    (hookIdent == MH_ALL_IDENTS || pHook->hookIdent == hookIdent) &&
+                    (pTarget == MH_ALL_HOOKS || (ULONG_PTR)pTarget == (ULONG_PTR)pHook->pTarget))
                 {
                     MH_STATUS enable_status = EnableHookLL(i, enable, &threads);
 
@@ -642,12 +644,6 @@ static MH_STATUS EnableHooksLL(BOOL bAllIdents, ULONG_PTR hookIdent, BOOL enable
     }
 
     return status;
-}
-
-//-------------------------------------------------------------------------
-static MH_STATUS EnableAllHooksLL(BOOL enable)
-{
-    return EnableHooksLL(TRUE, 0, enable);
 }
 
 //-------------------------------------------------------------------------
@@ -713,7 +709,7 @@ MH_STATUS WINAPI MH_Uninitialize(VOID)
     if (WaitForSingleObject(g_hMutex, INFINITE) != WAIT_OBJECT_0)
         return MH_ERROR_MUTEX_FAILURE;
 
-    MH_STATUS status = EnableAllHooksLL(FALSE);
+    MH_STATUS status = EnableHooksLL(MH_ALL_IDENTS, MH_ALL_HOOKS, FALSE);
 
     ReleaseMutex(g_hMutex);
 
@@ -836,7 +832,7 @@ MH_STATUS WINAPI MH_CreateHookEx(ULONG_PTR hookIdent, LPVOID pTarget, LPVOID pDe
 //-------------------------------------------------------------------------
 MH_STATUS WINAPI MH_CreateHook(LPVOID pTarget, LPVOID pDetour, LPVOID* ppOriginal)
 {
-    return MH_CreateHookEx(0, pTarget, pDetour, ppOriginal);
+    return MH_CreateHookEx(MH_DEFAULT_IDENT, pTarget, pDetour, ppOriginal);
 }
 
 //-------------------------------------------------------------------------
@@ -850,16 +846,17 @@ MH_STATUS WINAPI MH_RemoveHookEx(ULONG_PTR hookIdent, LPVOID pTarget)
 
     MH_STATUS status = MH_OK;
 
-    if (pTarget == MH_ALL_HOOKS)
+    if (hookIdent == MH_ALL_IDENTS || pTarget == MH_ALL_HOOKS)
     {
-        status = EnableHooksLL(FALSE, hookIdent, FALSE);
+        status = EnableHooksLL(hookIdent, pTarget, FALSE);
         if (status == MH_OK)
         {
             UINT i = 0;
             while (i < g_hooks.size)
             {
                 PHOOK_ENTRY pHook = &g_hooks.pItems[i];
-                if (pHook->hookIdent == hookIdent)
+                if ((hookIdent == MH_ALL_IDENTS || pHook->hookIdent == hookIdent) &&
+                    (pTarget == MH_ALL_HOOKS || (ULONG_PTR)pTarget == (ULONG_PTR)pHook->pTarget))
                 {
                     FreeBuffer(pHook->pExecBuffer);
                     DeleteHookEntry(i);
@@ -908,7 +905,7 @@ MH_STATUS WINAPI MH_RemoveHookEx(ULONG_PTR hookIdent, LPVOID pTarget)
 //-------------------------------------------------------------------------
 MH_STATUS WINAPI MH_RemoveHook(LPVOID pTarget)
 {
-    return MH_RemoveHookEx(0, pTarget);
+    return MH_RemoveHookEx(MH_DEFAULT_IDENT, pTarget);
 }
 
 //-------------------------------------------------------------------------
@@ -926,7 +923,8 @@ MH_STATUS WINAPI MH_RemoveDisabledHooksEx(ULONG_PTR hookIdent)
     while (i < g_hooks.size)
     {
         PHOOK_ENTRY pHook = &g_hooks.pItems[i];
-        if (pHook->hookIdent == hookIdent && !pHook->isEnabled)
+        if ((hookIdent == MH_ALL_IDENTS || pHook->hookIdent == hookIdent) &&
+            !pHook->isEnabled)
         {
             FreeBuffer(pHook->pExecBuffer);
             DeleteHookEntry(i);
@@ -945,14 +943,12 @@ MH_STATUS WINAPI MH_RemoveDisabledHooksEx(ULONG_PTR hookIdent)
 //-------------------------------------------------------------------------
 MH_STATUS WINAPI MH_RemoveDisabledHooks()
 {
-    return MH_RemoveDisabledHooksEx(0);
+    return MH_RemoveDisabledHooksEx(MH_DEFAULT_IDENT);
 }
 
 //-------------------------------------------------------------------------
 static MH_STATUS WINAPI DisableHookChain(ULONG_PTR hookIdent, LPVOID pTarget, UINT parentPos, ENABLE_HOOK_LL_PROC ParentEnableHookLL, PFROZEN_THREADS pThreads)
 {
-    MH_STATUS status;
-
     UINT pos = FindHookEntry(hookIdent, pTarget);
     if (pos == INVALID_HOOK_POS)
         return MH_ERROR_NOT_CREATED;
@@ -963,7 +959,7 @@ static MH_STATUS WINAPI DisableHookChain(ULONG_PTR hookIdent, LPVOID pTarget, UI
     // We're not Freeze()-ing the threads here, because we assume that the function
     // was called from a different MinHook module, which already suspended all threads.
 
-    status = EnableHookLL(pos, FALSE, pThreads);
+    MH_STATUS status = EnableHookLL(pos, FALSE, pThreads);
     if (status != MH_OK)
         return status;
 
@@ -985,9 +981,9 @@ static MH_STATUS EnableHook(ULONG_PTR hookIdent, LPVOID pTarget, BOOL enable)
 
     MH_STATUS status = MH_OK;
 
-    if (pTarget == MH_ALL_HOOKS)
+    if (hookIdent == MH_ALL_IDENTS || pTarget == MH_ALL_HOOKS)
     {
-        status = EnableHooksLL(FALSE, hookIdent, enable);
+        status = EnableHooksLL(hookIdent, pTarget, enable);
     }
     else
     {
@@ -1030,7 +1026,7 @@ MH_STATUS WINAPI MH_EnableHookEx(ULONG_PTR hookIdent, LPVOID pTarget)
 //-------------------------------------------------------------------------
 MH_STATUS WINAPI MH_EnableHook(LPVOID pTarget)
 {
-    return MH_EnableHookEx(0, pTarget);
+    return MH_EnableHookEx(MH_DEFAULT_IDENT, pTarget);
 }
 
 //-------------------------------------------------------------------------
@@ -1042,7 +1038,7 @@ MH_STATUS WINAPI MH_DisableHookEx(ULONG_PTR hookIdent, LPVOID pTarget)
 //-------------------------------------------------------------------------
 MH_STATUS WINAPI MH_DisableHook(LPVOID pTarget)
 {
-    return MH_DisableHookEx(0, pTarget);
+    return MH_DisableHookEx(MH_DEFAULT_IDENT, pTarget);
 }
 
 //-------------------------------------------------------------------------
@@ -1056,14 +1052,17 @@ static MH_STATUS QueueHook(ULONG_PTR hookIdent, LPVOID pTarget, BOOL queueEnable
 
     MH_STATUS status = MH_OK;
 
-    if (pTarget == MH_ALL_HOOKS)
+    if (hookIdent == MH_ALL_IDENTS || pTarget == MH_ALL_HOOKS)
     {
         UINT i;
         for (i = 0; i < g_hooks.size; ++i)
         {
             PHOOK_ENTRY pHook = &g_hooks.pItems[i];
-            if (pHook->hookIdent == hookIdent)
+            if ((hookIdent == MH_ALL_IDENTS || pHook->hookIdent == hookIdent) &&
+                (pTarget == MH_ALL_HOOKS || (ULONG_PTR)pTarget == (ULONG_PTR)pHook->pTarget))
+            {
                 pHook->queueEnable = queueEnable;
+            }
         }
     }
     else
@@ -1093,7 +1092,7 @@ MH_STATUS WINAPI MH_QueueEnableHookEx(ULONG_PTR hookIdent, LPVOID pTarget)
 //-------------------------------------------------------------------------
 MH_STATUS WINAPI MH_QueueEnableHook(LPVOID pTarget)
 {
-    return MH_QueueEnableHookEx(0, pTarget);
+    return MH_QueueEnableHookEx(MH_DEFAULT_IDENT, pTarget);
 }
 
 //-------------------------------------------------------------------------
@@ -1105,11 +1104,11 @@ MH_STATUS WINAPI MH_QueueDisableHookEx(ULONG_PTR hookIdent, LPVOID pTarget)
 //-------------------------------------------------------------------------
 MH_STATUS WINAPI MH_QueueDisableHook(LPVOID pTarget)
 {
-    return MH_QueueDisableHookEx(0, pTarget);
+    return MH_QueueDisableHookEx(MH_DEFAULT_IDENT, pTarget);
 }
 
 //-------------------------------------------------------------------------
-MH_STATUS WINAPI MH_ApplyQueued(VOID)
+MH_STATUS WINAPI MH_ApplyQueuedEx(ULONG_PTR hookIdent)
 {
     if (g_hMutex == NULL)
         return MH_ERROR_NOT_INITIALIZED;
@@ -1122,7 +1121,9 @@ MH_STATUS WINAPI MH_ApplyQueued(VOID)
 
     for (i = 0; i < g_hooks.size; ++i)
     {
-        if (g_hooks.pItems[i].isEnabled != g_hooks.pItems[i].queueEnable)
+        PHOOK_ENTRY pHook = &g_hooks.pItems[i];
+        if ((hookIdent == MH_ALL_IDENTS || pHook->hookIdent == hookIdent) &&
+            pHook->isEnabled != pHook->queueEnable)
         {
             first = i;
             break;
@@ -1138,7 +1139,8 @@ MH_STATUS WINAPI MH_ApplyQueued(VOID)
             for (i = first; i < g_hooks.size; ++i)
             {
                 PHOOK_ENTRY pHook = &g_hooks.pItems[i];
-                if (pHook->isEnabled != pHook->queueEnable)
+                if ((hookIdent == MH_ALL_IDENTS || pHook->hookIdent == hookIdent) &&
+                    pHook->isEnabled != pHook->queueEnable)
                 {
                     MH_STATUS enable_status = EnableHookLL(i, pHook->queueEnable, &threads);
 
@@ -1156,6 +1158,12 @@ MH_STATUS WINAPI MH_ApplyQueued(VOID)
     ReleaseMutex(g_hMutex);
 
     return status;
+}
+
+//-------------------------------------------------------------------------
+MH_STATUS WINAPI MH_ApplyQueued(VOID)
+{
+    return MH_ApplyQueuedEx(MH_DEFAULT_IDENT);
 }
 
 //-------------------------------------------------------------------------
