@@ -60,7 +60,7 @@ typedef struct _FROZEN_THREADS
 } FROZEN_THREADS, *PFROZEN_THREADS;
 
 // Thread freeze related definitions.
-typedef NTSTATUS(NTAPI* NtGetNextThread_t)(
+typedef NTSTATUS(NTAPI *NtGetNextThread_t)(
     _In_ HANDLE ProcessHandle,
     _In_opt_ HANDLE ThreadHandle,
     _In_ ACCESS_MASK DesiredAccess,
@@ -70,11 +70,11 @@ typedef NTSTATUS(NTAPI* NtGetNextThread_t)(
     );
 
 #ifndef STATUS_NO_MORE_ENTRIES
-#define STATUS_NO_MORE_ENTRIES ((NTSTATUS)0x8000001AL)
+    #define STATUS_NO_MORE_ENTRIES ((NTSTATUS)0x8000001AL)
 #endif
 
 #ifndef NT_SUCCESS
-#define NT_SUCCESS(Status) ((NTSTATUS)(Status) >= 0)
+    #define NT_SUCCESS(Status) ((NTSTATUS)(Status) >= 0)
 #endif
 
 // Function and function pointer declarations.
@@ -830,7 +830,7 @@ MH_STATUS WINAPI MH_CreateHookEx(ULONG_PTR hookIdent, LPVOID pTarget, LPVOID pDe
 }
 
 //-------------------------------------------------------------------------
-MH_STATUS WINAPI MH_CreateHook(LPVOID pTarget, LPVOID pDetour, LPVOID* ppOriginal)
+MH_STATUS WINAPI MH_CreateHook(LPVOID pTarget, LPVOID pDetour, LPVOID *ppOriginal)
 {
     return MH_CreateHookEx(MH_DEFAULT_IDENT, pTarget, pDetour, ppOriginal);
 }
