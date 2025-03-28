@@ -9,6 +9,8 @@
     MH_CreateHookApiEx
     MH_RemoveHook
     MH_RemoveHookEx
+    MH_RemoveDisabledHooks
+    MH_RemoveDisabledHooksEx
     MH_EnableHook
     MH_EnableHookEx
     MH_DisableHook
@@ -18,4 +20,5 @@
     MH_QueueDisableHook
     MH_QueueDisableHookEx
     MH_ApplyQueued
+    MH_ApplyQueuedEx
     MH_StatusToString
