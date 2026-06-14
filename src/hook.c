@@ -29,6 +29,7 @@
 #include <windows.h>
 #include <tlhelp32.h>
 #include <limits.h>
+#include <stddef.h>
 
 #include "../include/MinHook.h"
 #include "buffer.h"
@@ -197,6 +198,7 @@ static VOID DeleteHookEntry(UINT pos)
 //-------------------------------------------------------------------------
 static DWORD_PTR FindOldIP(PHOOK_ENTRY pHook, DWORD_PTR ip)
 {
+    UINT i;
     // In any of the jump locations:
     // Target -> Hotpatch jump (if patchAbove) -> Relay jump
     // Restore IP to the detour. This is required for consistent behavior
@@ -212,7 +214,6 @@ static DWORD_PTR FindOldIP(PHOOK_ENTRY pHook, DWORD_PTR ip)
     if (ip == (DWORD_PTR)&pHook->pExecBuffer->jmpRelay)
         return (DWORD_PTR)pHook->pDetour;
 
-    UINT i;
     for (i = 0; i < pHook->nIP; ++i)
     {
         if (ip == ((DWORD_PTR)pHook->pExecBuffer->trampoline + pHook->newIPs[i]))
@@ -361,6 +362,7 @@ static BOOL EnumerateAndSuspendThreadsFast(PFROZEN_THREADS pThreads)
     while (1)
     {
         HANDLE hNextThread;
+        CONTEXT c;
         NTSTATUS status = pNtGetNextThread(GetCurrentProcess(), hThread, THREAD_ACCESS, 0, 0, &hNextThread);
         if (bClosePrevThread)
             CloseHandle(hThread);
@@ -393,8 +395,9 @@ static BOOL EnumerateAndSuspendThreadsFast(PFROZEN_THREADS pThreads)
         }
         else if (pThreads->size >= pThreads->capacity)
         {
+            LPHANDLE p;
             pThreads->capacity *= 2;
-            LPHANDLE p = (LPHANDLE)HeapReAlloc(
+            p = (LPHANDLE)HeapReAlloc(
                 g_hHeap, 0, pThreads->pItems, pThreads->capacity * sizeof(HANDLE));
             if (p)
                 pThreads->pItems = p;
@@ -411,7 +414,6 @@ static BOOL EnumerateAndSuspendThreadsFast(PFROZEN_THREADS pThreads)
 
         // Perform a synchronous operation to make sure the thread really is suspended.
         // https://devblogs.microsoft.com/oldnewthing/20150205-00/?p=44743
-        CONTEXT c;
         c.ContextFlags = CONTEXT_CONTROL;
         GetThreadContext(hThread, &c);
 
@@ -703,13 +705,15 @@ MH_STATUS WINAPI MH_Initialize(VOID)
 //-------------------------------------------------------------------------
 MH_STATUS WINAPI MH_Uninitialize(VOID)
 {
+    MH_STATUS status;
+
     if (g_hMutex == NULL)
         return MH_ERROR_NOT_INITIALIZED;
 
     if (WaitForSingleObject(g_hMutex, INFINITE) != WAIT_OBJECT_0)
         return MH_ERROR_MUTEX_FAILURE;
 
-    MH_STATUS status = EnableHooksLL(MH_ALL_IDENTS, MH_ALL_HOOKS, FALSE);
+    status = EnableHooksLL(MH_ALL_IDENTS, MH_ALL_HOOKS, FALSE);
 
     ReleaseMutex(g_hMutex);
 
@@ -766,13 +770,13 @@ MH_STATUS WINAPI MH_SetThreadFreezeMethod(MH_THREAD_FREEZE_METHOD method)
 //-------------------------------------------------------------------------
 MH_STATUS WINAPI MH_CreateHookEx(ULONG_PTR hookIdent, LPVOID pTarget, LPVOID pDetour, LPVOID *ppOriginal)
 {
+    MH_STATUS status = MH_OK;
+
     if (g_hMutex == NULL)
         return MH_ERROR_NOT_INITIALIZED;
 
     if (WaitForSingleObject(g_hMutex, INFINITE) != WAIT_OBJECT_0)
         return MH_ERROR_MUTEX_FAILURE;
-
-    MH_STATUS status = MH_OK;
 
     if (IsExecutableAddress(pTarget) && IsExecutableAddress(pDetour))
     {
@@ -838,13 +842,13 @@ MH_STATUS WINAPI MH_CreateHook(LPVOID pTarget, LPVOID pDetour, LPVOID *ppOrigina
 //-------------------------------------------------------------------------
 MH_STATUS WINAPI MH_RemoveHookEx(ULONG_PTR hookIdent, LPVOID pTarget)
 {
+    MH_STATUS status = MH_OK;
+
     if (g_hMutex == NULL)
         return MH_ERROR_NOT_INITIALIZED;
 
     if (WaitForSingleObject(g_hMutex, INFINITE) != WAIT_OBJECT_0)
         return MH_ERROR_MUTEX_FAILURE;
-
-    MH_STATUS status = MH_OK;
 
     if (hookIdent == MH_ALL_IDENTS || pTarget == MH_ALL_HOOKS)
     {
@@ -911,15 +915,15 @@ MH_STATUS WINAPI MH_RemoveHook(LPVOID pTarget)
 //-------------------------------------------------------------------------
 MH_STATUS WINAPI MH_RemoveDisabledHooksEx(ULONG_PTR hookIdent)
 {
+    MH_STATUS status = MH_OK;
+    UINT i = 0;
+
     if (g_hMutex == NULL)
         return MH_ERROR_NOT_INITIALIZED;
 
     if (WaitForSingleObject(g_hMutex, INFINITE) != WAIT_OBJECT_0)
         return MH_ERROR_MUTEX_FAILURE;
 
-    MH_STATUS status = MH_OK;
-
-    UINT i = 0;
     while (i < g_hooks.size)
     {
         PHOOK_ENTRY pHook = &g_hooks.pItems[i];
@@ -949,6 +953,7 @@ MH_STATUS WINAPI MH_RemoveDisabledHooks()
 //-------------------------------------------------------------------------
 static MH_STATUS WINAPI DisableHookChain(ULONG_PTR hookIdent, LPVOID pTarget, UINT parentPos, ENABLE_HOOK_LL_PROC ParentEnableHookLL, PFROZEN_THREADS pThreads)
 {
+    MH_STATUS status;
     UINT pos = FindHookEntry(hookIdent, pTarget);
     if (pos == INVALID_HOOK_POS)
         return MH_ERROR_NOT_CREATED;
@@ -959,7 +964,7 @@ static MH_STATUS WINAPI DisableHookChain(ULONG_PTR hookIdent, LPVOID pTarget, UI
     // We're not Freeze()-ing the threads here, because we assume that the function
     // was called from a different MinHook module, which already suspended all threads.
 
-    MH_STATUS status = EnableHookLL(pos, FALSE, pThreads);
+    status = EnableHookLL(pos, FALSE, pThreads);
     if (status != MH_OK)
         return status;
 
@@ -973,13 +978,13 @@ static MH_STATUS WINAPI DisableHookChain(ULONG_PTR hookIdent, LPVOID pTarget, UI
 //-------------------------------------------------------------------------
 static MH_STATUS EnableHook(ULONG_PTR hookIdent, LPVOID pTarget, BOOL enable)
 {
+    MH_STATUS status = MH_OK;
+
     if (g_hMutex == NULL)
         return MH_ERROR_NOT_INITIALIZED;
 
     if (WaitForSingleObject(g_hMutex, INFINITE) != WAIT_OBJECT_0)
         return MH_ERROR_MUTEX_FAILURE;
-
-    MH_STATUS status = MH_OK;
 
     if (hookIdent == MH_ALL_IDENTS || pTarget == MH_ALL_HOOKS)
     {
@@ -1044,13 +1049,13 @@ MH_STATUS WINAPI MH_DisableHook(LPVOID pTarget)
 //-------------------------------------------------------------------------
 static MH_STATUS QueueHook(ULONG_PTR hookIdent, LPVOID pTarget, BOOL queueEnable)
 {
+    MH_STATUS status = MH_OK;
+
     if (g_hMutex == NULL)
         return MH_ERROR_NOT_INITIALIZED;
 
     if (WaitForSingleObject(g_hMutex, INFINITE) != WAIT_OBJECT_0)
         return MH_ERROR_MUTEX_FAILURE;
-
-    MH_STATUS status = MH_OK;
 
     if (hookIdent == MH_ALL_IDENTS || pTarget == MH_ALL_HOOKS)
     {
@@ -1110,14 +1115,14 @@ MH_STATUS WINAPI MH_QueueDisableHook(LPVOID pTarget)
 //-------------------------------------------------------------------------
 MH_STATUS WINAPI MH_ApplyQueuedEx(ULONG_PTR hookIdent)
 {
+    MH_STATUS status = MH_OK;
+    UINT i, first = INVALID_HOOK_POS;
+
     if (g_hMutex == NULL)
         return MH_ERROR_NOT_INITIALIZED;
 
     if (WaitForSingleObject(g_hMutex, INFINITE) != WAIT_OBJECT_0)
         return MH_ERROR_MUTEX_FAILURE;
-
-    MH_STATUS status = MH_OK;
-    UINT i, first = INVALID_HOOK_POS;
 
     for (i = 0; i < g_hooks.size; ++i)
     {
