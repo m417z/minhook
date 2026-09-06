@@ -11,14 +11,20 @@
 #include "hde32.h"
 #include "table32.h"
 
+/* An instruction is at most 15 bytes long, so the bytes past that may not be
+ * mapped: a decode that would run over the limit stops instead of reading. */
+#define NEED(n) do { if (limit - p < (n)) goto error_length; } while (0)
+
 unsigned int hde32_disasm(const void *code, hde32s *hs)
 {
     uint8_t x, c, *p = (uint8_t *)code, cflags, opcode, pref = 0;
     uint8_t *ht = hde32_table, m_mod, m_reg, m_rm, disp_size = 0;
+    uint8_t ext = 0;
+    uint8_t *limit = (uint8_t *)code + 15;
 
     memset(hs, 0, sizeof(hde32s));
 
-    for (x = 16; x; x--)
+    for (x = 15; x; x--)
         switch (c = *p++) {
             case 0xf3:
                 hs->p_rep = c;
@@ -48,6 +54,8 @@ unsigned int hde32_disasm(const void *code, hde32s *hs)
             default:
                 goto pref_done;
         }
+    goto error_length;          /* 15 prefixes leave no room for an opcode */
+
   pref_done:
 
     hs->flags = (uint32_t)pref << 23;
@@ -55,8 +63,101 @@ unsigned int hde32_disasm(const void *code, hde32s *hs)
     if (!pref)
         pref |= PRE_NONE;
 
+    /* VEX, EVEX and XOP. C4, C5 and 62 keep their legacy meaning unless the
+     * byte after them has mod = 11, which les, lds and bound cannot encode;
+     * 8F is an escape only from map 8 upwards, which leaves 8F /0 as pop. The
+     * header names the opcode map, the map decides the immediate, and every
+     * instruction reached this way has a ModR/M byte. */
+    if (p < limit &&
+        (((c == 0xc4 || c == 0xc5 || c == 0x62) && (*p & 0xc0) == 0xc0) ||
+         (c == 0x8f && (*p & 0x1f) >= 8))) {
+        uint8_t map;
+
+        hs->opcode = c;
+        if (c == 0xc5) {
+            NEED(3);
+            map = 1;
+            p++;
+        } else if (c == 0x62) {
+            NEED(5);
+            map = *p & 0x0f;
+            p += 3;
+        } else {
+            NEED(4);
+            map = *p & 0x1f;
+            p += 2;
+        }
+        hs->opcode2 = opcode = *p++;
+
+        /* The escape carries the operand size itself, so a 66, F2, F3 or LOCK
+         * in front of it is invalid. A segment or 67 prefix still applies. */
+        if (pref & (PRE_66 | PRE_F2 | PRE_F3 | PRE_LOCK))
+            hs->flags |= F_ERROR | F_ERROR_OPCODE;
+        pref &= ~PRE_66;
+
+        cflags = C_MODRM;
+        if (c == 0x8f) {
+            switch (map) {
+                case 8:                 /* every XOP8 opcode takes an imm8 */
+                    cflags |= C_IMM8;
+                    break;
+                case 9:                 /* no XOP9 opcode takes one */
+                    break;
+                case 10:                /* bextr and the lwp forms: imm32 */
+                    cflags |= C_IMM_P66;
+                    break;
+                default:
+                    hs->flags |= F_ERROR | F_ERROR_OPCODE;
+                    break;
+            }
+        } else switch (map) {
+            case 1:                     /* 0F map */
+                if (opcode == 0x70 || (opcode >= 0x71 && opcode <= 0x73) ||
+                    opcode == 0xc2 || (opcode >= 0xc4 && opcode <= 0xc6))
+                    cflags |= C_IMM8;
+                else if (c != 0x62 && opcode == 0x77)
+                    cflags = C_NONE;    /* vzeroupper and vzeroall: no ModR/M */
+                break;
+            case 2:                     /* 0F 38 map: never an immediate */
+                break;
+            case 3:                     /* 0F 3A map: always an imm8 */
+                cflags |= C_IMM8;
+                break;
+            case 5: case 6:             /* half-precision maps, EVEX only */
+                if (c != 0x62)
+                    hs->flags |= F_ERROR | F_ERROR_OPCODE;
+                else if (map == 5 && (opcode == 0x08 || opcode == 0x0a ||
+                                      opcode == 0x26 || opcode == 0x27 ||
+                                      opcode == 0x56 || opcode == 0x57 ||
+                                      opcode == 0x66 || opcode == 0x67 ||
+                                      opcode == 0xc2))
+                    cflags |= C_IMM8;   /* the 0F 3A forms of that map */
+                break;
+            default:
+                hs->flags |= F_ERROR | F_ERROR_OPCODE;
+                break;
+        }
+        ext = 1;
+        x = 0;
+        goto modrm;
+    }
+
     if ((hs->opcode = c) == 0x0f) {
+        NEED(1);
         hs->opcode2 = c = *p++;
+        if (c == 0x38 || c == 0x3a) {
+            /* Three-byte maps: the opcode follows and always has a ModR/M
+             * byte. Every 0F 3A opcode takes an imm8, no 0F 38 one does, and
+             * none of them is lockable. */
+            NEED(2);
+            opcode = *p++;
+            cflags = (c == 0x3a) ? (C_MODRM | C_IMM8) : C_MODRM;
+            if (pref & PRE_LOCK)
+                hs->flags |= F_ERROR | F_ERROR_LOCK;
+            ext = 1;
+            x = 0;
+            goto modrm;
+        }
         ht += DELTA_OPCODES;
     } else if (c >= 0xa0 && c <= 0xa3) {
         if (pref & PRE_67)
@@ -70,9 +171,13 @@ unsigned int hde32_disasm(const void *code, hde32s *hs)
 
     if (cflags == C_ERROR) {
         hs->flags |= F_ERROR | F_ERROR_OPCODE;
+        /* An unknown opcode is still measured when its shape is known: 0F 24
+         * and 0F 26 (test registers), 0F A6 and 0F A7 (PadLock), 0F B9 (ud1)
+         * and 0F FF (ud0) all take a ModR/M byte. */
         cflags = 0;
-        if ((opcode & -3) == 0x24)
-            cflags++;
+        if ((opcode & -3) == 0x24 || opcode == 0xa6 || opcode == 0xa7 ||
+            opcode == 0xb9 || opcode == 0xff)
+            cflags = C_MODRM;
     }
 
     x = 0;
@@ -87,10 +192,16 @@ unsigned int hde32_disasm(const void *code, hde32s *hs)
         ht = hde32_table + DELTA_PREFIXES;
         if (ht[ht[opcode / 4] + (opcode % 4)] & pref)
             hs->flags |= F_ERROR | F_ERROR_OPCODE;
+        /* vmread, vmwrite and popcnt take a ModR/M byte that the table cannot
+         * give them: their entries share a row with opcodes that take none. */
+        if (opcode == 0x78 || opcode == 0x79 || opcode == 0xb8)
+            cflags |= C_MODRM;
     }
 
+  modrm:
     if (cflags & C_MODRM) {
         hs->flags |= F_MODRM;
+        NEED(1);
         hs->modrm = c = *p++;
         hs->modrm_mod = m_mod = c >> 6;
         hs->modrm_rm = m_rm = c & 7;
@@ -98,6 +209,9 @@ unsigned int hde32_disasm(const void *code, hde32s *hs)
 
         if (x && ((x << m_reg) & 0x80))
             hs->flags |= F_ERROR | F_ERROR_OPCODE;
+
+        if (ext)
+            goto no_error_operand;      /* no legacy operand rule applies */
 
         if (!hs->opcode2 && opcode >= 0xd9 && opcode <= 0xdf) {
             uint8_t t = opcode - 0xd9;
@@ -206,13 +320,21 @@ unsigned int hde32_disasm(const void *code, hde32s *hs)
         hs->flags |= F_ERROR | F_ERROR_OPERAND;
       no_error_operand:
 
-        c = *p++;
-        if (m_reg <= 1) {
+        /* Group 3: F6 /0 and /1 take an imm8, F7 /0 and /1 an imm32 or imm16.
+         * The rule belongs to the one-byte map; 0F F6 and 0F F7 are psadbw
+         * and maskmovq, which take neither. */
+        if (!ext && !hs->opcode2 && m_reg <= 1) {
             if (opcode == 0xf6)
                 cflags |= C_IMM8;
             else if (opcode == 0xf7)
                 cflags |= C_IMM_P66;
         }
+        /* C7 /7 is xbegin, whose immediate is a displacement. */
+        if (!ext && !hs->opcode2 && opcode == 0xc7 && m_reg == 7)
+            hs->flags |= F_RELATIVE;
+        /* extrq and insertq take two imm8 operands where vmread takes none. */
+        if (!ext && hs->opcode2 == 0x78 && (pref & (PRE_66 | PRE_F2)))
+            cflags |= C_IMM16;
 
         switch (m_mod) {
             case 0:
@@ -235,36 +357,39 @@ unsigned int hde32_disasm(const void *code, hde32s *hs)
 
         if (m_mod != 3 && m_rm == 4 && !(pref & PRE_67)) {
             hs->flags |= F_SIB;
-            p++;
-            hs->sib = c;
+            NEED(1);
+            hs->sib = c = *p++;
             hs->sib_scale = c >> 6;
             hs->sib_index = (c & 0x3f) >> 3;
             if ((hs->sib_base = c & 7) == 5 && !(m_mod & 1))
                 disp_size = 4;
         }
 
-        p--;
-        switch (disp_size) {
-            case 1:
-                hs->flags |= F_DISP8;
-                hs->disp.disp8 = *p;
-                break;
-            case 2:
-                hs->flags |= F_DISP16;
-                hs->disp.disp16 = *(uint16_t *)p;
-                break;
-            case 4:
-                hs->flags |= F_DISP32;
-                hs->disp.disp32 = *(uint32_t *)p;
-                break;
+        if (disp_size) {
+            NEED(disp_size);
+            switch (disp_size) {
+                case 1:
+                    hs->flags |= F_DISP8;
+                    hs->disp.disp8 = *p;
+                    break;
+                case 2:
+                    hs->flags |= F_DISP16;
+                    hs->disp.disp16 = *(uint16_t *)p;
+                    break;
+                case 4:
+                    hs->flags |= F_DISP32;
+                    hs->disp.disp32 = *(uint32_t *)p;
+                    break;
+            }
+            p += disp_size;
         }
-        p += disp_size;
     } else if (pref & PRE_LOCK)
         hs->flags |= F_ERROR | F_ERROR_LOCK;
 
     if (cflags & C_IMM_P66) {
         if (cflags & C_REL32) {
             if (pref & PRE_66) {
+                NEED(2);
                 hs->flags |= F_IMM16 | F_RELATIVE;
                 hs->imm.imm16 = *(uint16_t *)p;
                 p += 2;
@@ -273,10 +398,12 @@ unsigned int hde32_disasm(const void *code, hde32s *hs)
             goto rel32_ok;
         }
         if (pref & PRE_66) {
+            NEED(2);
             hs->flags |= F_IMM16;
             hs->imm.imm16 = *(uint16_t *)p;
             p += 2;
         } else {
+            NEED(4);
             hs->flags |= F_IMM32;
             hs->imm.imm32 = *(uint32_t *)p;
             p += 4;
@@ -284,6 +411,7 @@ unsigned int hde32_disasm(const void *code, hde32s *hs)
     }
 
     if (cflags & C_IMM16) {
+        NEED(2);
         if (hs->flags & F_IMM32) {
             hs->flags |= F_IMM16;
             hs->disp.disp16 = *(uint16_t *)p;
@@ -297,28 +425,38 @@ unsigned int hde32_disasm(const void *code, hde32s *hs)
         p += 2;
     }
     if (cflags & C_IMM8) {
+        NEED(1);
         hs->flags |= F_IMM8;
-        hs->imm.imm8 = *p++;
+        if (hs->flags & F_IMM16)
+            hs->disp.disp8 = *p++;      /* enter: the union holds the imm16 */
+        else
+            hs->imm.imm8 = *p++;
     }
 
     if (cflags & C_REL32) {
       rel32_ok:
+        NEED(4);
         hs->flags |= F_IMM32 | F_RELATIVE;
         hs->imm.imm32 = *(uint32_t *)p;
         p += 4;
     } else if (cflags & C_REL8) {
+        NEED(1);
         hs->flags |= F_IMM8 | F_RELATIVE;
         hs->imm.imm8 = *p++;
     }
 
   disasm_done:
 
-    if ((hs->len = (uint8_t)(p-(uint8_t *)code)) > 15) {
-        hs->flags |= F_ERROR | F_ERROR_LENGTH;
-        hs->len = 15;
-    }
-
+    hs->len = (uint8_t)(p - (uint8_t *)code);
     return (unsigned int)hs->len;
+
+  error_length:
+
+    hs->flags |= F_ERROR | F_ERROR_LENGTH;
+    hs->len = 15;
+    return 15;
 }
+
+#undef NEED
 
 #endif // defined(_M_IX86) || defined(__i386__)
