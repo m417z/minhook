@@ -17,9 +17,10 @@
 
 unsigned int hde64_disasm(const void *code, hde64s *hs)
 {
-    uint8_t x, c, *p = (uint8_t *)code, cflags, opcode, pref = 0;
+    uint8_t x, c, *p = (uint8_t *)code, cflags, opcode, pref = 0, mand = 0;
+    uint8_t map0f = 0;          /* the opcode came from the 0F map */
     uint8_t *ht = hde64_table, m_mod, m_reg, m_rm, disp_size = 0;
-    uint8_t op64 = 0, rex = 0, ext = 0;
+    uint8_t op64 = 0, rex = 0, rex2 = 0, have_rex2 = 0, ext = 0;
     uint8_t *limit = (uint8_t *)code + 15;
 
     memset(hs, 0, sizeof(hde64s));
@@ -29,11 +30,13 @@ unsigned int hde64_disasm(const void *code, hde64s *hs)
             case 0xf3:
                 hs->p_rep = c;
                 pref |= PRE_F3;
+                mand = PRE_F3;
                 rex = 0;
                 break;
             case 0xf2:
                 hs->p_rep = c;
                 pref |= PRE_F2;
+                mand = PRE_F2;
                 rex = 0;
                 break;
             case 0xf0:
@@ -50,6 +53,8 @@ unsigned int hde64_disasm(const void *code, hde64s *hs)
             case 0x66:
                 hs->p_66 = c;
                 pref |= PRE_66;
+                if (!mand)
+                    mand = PRE_66;
                 rex = 0;
                 break;
             case 0x67:
@@ -73,6 +78,12 @@ unsigned int hde64_disasm(const void *code, hde64s *hs)
 
     if (!pref)
         pref |= PRE_NONE;
+    /* pref says which prefix classes are present, which is what an
+     * operand-size or LOCK rule asks. A mandatory prefix is a choice
+     * between 66, F2 and F3 rather than a set, so the rules that select
+     * an instruction read mand instead. */
+    if (!mand)
+        mand = PRE_NONE;
 
     if (rex) {
         hs->flags |= F_PREFIX_REX;
@@ -165,9 +176,50 @@ unsigned int hde64_disasm(const void *code, hde64s *hs)
         goto modrm;
     }
 
-    if ((hs->opcode = c) == 0x0f) {
+    /* REX2: D5, a payload byte, then the opcode. The payload names the
+     * opcode map in its top bit, so a 0F opcode is reached without the 0F
+     * byte, and carries the register extensions, with W where REX keeps it.
+     * Only legacy instructions are promoted this way, so the tables give the
+     * right shape once the map is known. */
+    if (c == 0xd5) {
+        NEED(2);
+        rex2 = *p++;
+        have_rex2 = 1;
+        c = *p++;
+        hs->flags |= F_PREFIX_REX2;
+        if (rex)                /* REX2 replaces a REX, it cannot follow one */
+            hs->flags |= F_ERROR | F_ERROR_OPCODE;
+        hs->rex_w = (rex2 & 8) >> 3;
+        hs->rex_r = (rex2 & 4) >> 2;
+        hs->rex_x = (rex2 & 2) >> 1;
+        hs->rex_b = rex2 & 1;
+        if (rex2 & 0x80) {
+            hs->opcode = 0xd5;
+            hs->opcode2 = c;
+            map0f = 1;
+            ht += DELTA_OPCODES;
+            goto opcode_ready;
+        }
+        /* Map 0 is the one-byte map, and REX2 has to be the last byte
+         * before the opcode: neither the 0F escape nor a further prefix
+         * can follow it. 8F is deliberately absent, and adding it would be
+         * wrong: it is POP here, not an XOP escape, and D5 00 8F C0 is a
+         * promoted pop. The other escapes are absent because their opcodes
+         * have no table entry, so they are rejected either way. */
+        if (c == 0x0f || (c & 0xf0) == 0x40 ||
+            c == 0x26 || c == 0x2e || c == 0x36 || c == 0x3e ||
+            c == 0x64 || c == 0x65 || c == 0x66 || c == 0x67 ||
+            c == 0xf0 || c == 0xf2 || c == 0xf3)
+            hs->flags |= F_ERROR | F_ERROR_OPCODE;
+        if (hs->rex_w && (c & 0xf8) == 0xb8)
+            op64++;             /* B8+r, map 0's mov r64, imm64 */
+    }
+
+    hs->opcode = c;
+    if (!have_rex2 && c == 0x0f) {
         NEED(1);
         hs->opcode2 = c = *p++;
+        map0f = 1;
         if (c == 0x38 || c == 0x3a) {
             /* Three-byte maps: the opcode follows and always has a ModR/M
              * byte. Every 0F 3A opcode takes an imm8, no 0F 38 one does, and
@@ -190,18 +242,30 @@ unsigned int hde64_disasm(const void *code, hde64s *hs)
         pref &= ~PRE_66;
     }
 
+  opcode_ready:
     opcode = c;
     cflags = ht[ht[opcode / 4] + (opcode % 4)];
 
     if (cflags == C_ERROR) {
-        hs->flags |= F_ERROR | F_ERROR_OPCODE;
-        /* An unknown opcode is still measured when its shape is known: 0F 24
-         * and 0F 26 (test registers), 0F A6 and 0F A7 (PadLock), 0F B9 (ud1)
-         * and 0F FF (ud0) all take a ModR/M byte. */
+        /* The table carries no entry for the opcode. Some of these are real
+         * instructions whose shape is known, and flagging one denies the caller a
+         * length it could have used; the rest keep F_ERROR, because the opcode
+         * is not one this engine can claim to know. */
         cflags = 0;
-        if ((opcode & -3) == 0x24 || opcode == 0xa6 || opcode == 0xa7 ||
-            opcode == 0xb9 || opcode == 0xff)
-            cflags = C_MODRM;
+        if (map0f && (opcode == 0x0b ||
+                            (opcode == 0x37 &&
+                             mand == PRE_NONE))) {
+            ;                           /* ud2 and getsec take no operand */
+        } else if (map0f && (opcode == 0xa6 || opcode == 0xa7 ||
+                                   opcode == 0xb9 || opcode == 0xff)) {
+            cflags = C_MODRM;           /* PadLock, ud1 and ud0 */
+        } else if (!map0f && (opcode == 0x9e || opcode == 0x9f)) {
+            ;                           /* sahf and lahf, back since 2006 */
+        } else {
+            hs->flags |= F_ERROR | F_ERROR_OPCODE;
+            if (map0f && (opcode & -3) == 0x24)
+                cflags = C_MODRM;       /* the test registers: shape only */
+        }
     }
 
     x = 0;
@@ -212,9 +276,14 @@ unsigned int hde64_disasm(const void *code, hde64s *hs)
         x = (uint8_t)(t >> 8);
     }
 
-    if (hs->opcode2) {
+    if (map0f) {
         ht = hde64_table + DELTA_PREFIXES;
-        if (ht[ht[opcode / 4] + (opcode % 4)] & pref)
+        /* movntsd and movntss are F2 0F 2B and F3 0F 2B. The row 0F 2B
+         * reads rejects both, and it is shared with a neighbour that has
+         * no such form, so the exception lives here rather than in the
+         * table. */
+        if ((ht[ht[opcode / 4] + (opcode % 4)] & mand) &&
+            !(opcode == 0x2b && (mand & (PRE_F2 | PRE_F3))))
             hs->flags |= F_ERROR | F_ERROR_OPCODE;
         /* vmread, vmwrite and popcnt take a ModR/M byte that the table cannot
          * give them: their entries share a row with opcodes that take none. */
@@ -237,7 +306,7 @@ unsigned int hde64_disasm(const void *code, hde64s *hs)
         if (ext)
             goto no_error_operand;      /* no legacy operand rule applies */
 
-        if (!hs->opcode2 && opcode >= 0xd9 && opcode <= 0xdf) {
+        if (!map0f && opcode >= 0xd9 && opcode <= 0xdf) {
             uint8_t t = opcode - 0xd9;
             if (m_mod == 3) {
                 ht = hde64_table + DELTA_FPU_MODRM + t*8;
@@ -255,7 +324,7 @@ unsigned int hde64_disasm(const void *code, hde64s *hs)
                 hs->flags |= F_ERROR | F_ERROR_LOCK;
             } else {
                 uint8_t *table_end, op = opcode;
-                if (hs->opcode2) {
+                if (map0f) {
                     ht = hde64_table + DELTA_OP2_LOCK_OK;
                     table_end = ht + DELTA_OP_ONLY_MEM - DELTA_OP2_LOCK_OK;
                 } else {
@@ -276,7 +345,7 @@ unsigned int hde64_disasm(const void *code, hde64s *hs)
             }
         }
 
-        if (hs->opcode2) {
+        if (map0f) {
             switch (opcode) {
                 case 0x20: case 0x22:
                     m_mod = 3;
@@ -286,10 +355,9 @@ unsigned int hde64_disasm(const void *code, hde64s *hs)
                         goto no_error_operand;
                 case 0x21: case 0x23:
                     m_mod = 3;
-                    if (m_reg == 4 || m_reg == 5)
-                        goto error_operand;
-                    else
-                        goto no_error_operand;
+                    /* dr4 and dr5 alias dr6 and dr7 unless CR4.DE is set, so
+                     * they decode rather than fault. */
+                    goto no_error_operand;
             }
         } else {
             switch (opcode) {
@@ -308,7 +376,7 @@ unsigned int hde64_disasm(const void *code, hde64s *hs)
 
         if (m_mod == 3) {
             uint8_t *table_end;
-            if (hs->opcode2) {
+            if (map0f) {
                 ht = hde64_table + DELTA_OP2_ONLY_MEM;
                 table_end = ht + sizeof(hde64_table) - DELTA_OP2_ONLY_MEM;
             } else {
@@ -317,20 +385,20 @@ unsigned int hde64_disasm(const void *code, hde64s *hs)
             }
             for (; ht != table_end; ht += 2)
                 if (*ht++ == opcode) {
-                    if ((*ht++ & pref) && !((*ht << m_reg) & 0x80))
+                    if ((*ht++ & mand) && !((*ht << m_reg) & 0x80))
                         goto error_operand;
                     else
                         break;
                 }
             goto no_error_operand;
-        } else if (hs->opcode2) {
+        } else if (map0f) {
             switch (opcode) {
                 case 0x50: case 0xd7: case 0xf7:
-                    if (pref & (PRE_NONE | PRE_66))
+                    if (mand & (PRE_NONE | PRE_66))
                         goto error_operand;
                     break;
                 case 0xd6:
-                    if (pref & (PRE_F2 | PRE_F3))
+                    if (mand & (PRE_F2 | PRE_F3))
                         goto error_operand;
                     break;
                 case 0xc5:
@@ -347,17 +415,17 @@ unsigned int hde64_disasm(const void *code, hde64s *hs)
         /* Group 3: F6 /0 and /1 take an imm8, F7 /0 and /1 an imm32 or imm16.
          * The rule belongs to the one-byte map; 0F F6 and 0F F7 are psadbw
          * and maskmovq, which take neither. */
-        if (!ext && !hs->opcode2 && m_reg <= 1) {
+        if (!ext && !map0f && m_reg <= 1) {
             if (opcode == 0xf6)
                 cflags |= C_IMM8;
             else if (opcode == 0xf7)
                 cflags |= C_IMM_P66;
         }
         /* C7 /7 is xbegin, whose immediate is a displacement. */
-        if (!ext && !hs->opcode2 && opcode == 0xc7 && m_reg == 7)
+        if (!ext && !map0f && opcode == 0xc7 && m_reg == 7)
             hs->flags |= F_RELATIVE;
         /* extrq and insertq take two imm8 operands where vmread takes none. */
-        if (!ext && hs->opcode2 == 0x78 && (pref & (PRE_66 | PRE_F2)))
+        if (!ext && map0f && opcode == 0x78 && (mand & (PRE_66 | PRE_F2)))
             cflags |= C_IMM16;
 
         switch (m_mod) {
